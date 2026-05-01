@@ -1,0 +1,49 @@
+{
+  "id": "mnemosyne",
+  "kind": "memory",
+  "activation": {
+    "onStartup": false
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "dbPath": {
+        "type": "string",
+        "description": "Path to SQLite database file. Defaults to ~/.openclaw/memory/mnemosyne.db",
+        "default": "~/.openclaw/memory/mnemosyne.db"
+      },
+      "ownerObserveOthers": {
+        "type": "boolean",
+        "default": true,
+        "description": "Whether owner messages are captured alongside agent messages"
+      },
+      "noisePatterns": {
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "Substring patterns to skip when capturing messages (e.g. HEARTBEAT_OK, cron reminders)"
+      },
+      "maxMessagesPerSession": {
+        "type": "integer",
+        "minimum": 100,
+        "maximum": 100000,
+        "default": 10000,
+        "description": "Automatic pruning: keep only N most recent messages per session"
+      },
+      "maxMemoriesPerSession": {
+        "type": "integer",
+        "minimum": 10,
+        "maximum": 10000,
+        "default": 1000,
+        "description": "Automatic pruning: keep only N most recent explicit memories per session"
+      }
+    }
+  },
+  "commandAliases": [
+    {
+      "name": "memory",
+      "kind": "runtime-slash",
+      "cliCommand": "mnemosyne"
+    }
+  ]
+}

@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+
+# Build output (these are generated — keep in dist for npm publish but track with git too for easy install)
+# dist/ is intentionally committed for plugin loader compatibility
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Test artifacts
+*.test.db
+*.db-shm
+*.db-wal
+
+# Debug
+npm-debug.log*
