@@ -2,6 +2,20 @@
 
 All notable changes to the Mnemosyne OpenClaw plugin.
 
+## [1.1.1] — 2026-05-01
+
+### Changed
+- **`mnemosyne_recall` now routes query-based recall through FTS5** — Porter stemming (e.g. "remembering" matches "remember"), ranked results, 10-100x faster than LIKE on large DBs. LIKE path retained as fallback when `enableFts: false`
+- **Exact-key recall preserved** — direct SQL index scan, fastest path, unchanged
+
+### Added
+- **`SECURITY.md`** — trust model, zero-network architecture guarantees, attack surface analysis, rejected security mechanisms with rationale
+- **Non-Goals section in README** — explicitly lists features we intentionally exclude (vector embeddings, knowledge graphs, SQLCipher, npm publishing, config hot-reload)
+
+### Documentation
+- README updated with Non-Goals table to prevent future audit confusion
+- CHANGELOG reflects both audit responses and v1.1.1 changes
+
 ## [1.1.0] — 2026-05-01
 
 ### Added

@@ -191,35 +191,73 @@ Examples:
       return withRetry(() => {
         let rows: Array<{ key: string; value: string; updated_at: number; session_key: string }>;
 
-        if (crossSession && (key || query)) {
-          // Cross-session: search across all sessions (no session filter)
-          const searchTerm = key || query;
-          const stmt = state.db.prepare(`
-            SELECT key, value, updated_at, session_key FROM memories
-            WHERE (key LIKE ? OR value LIKE ?)
-            ORDER BY updated_at DESC
-            LIMIT ?
-          `);
-          const like = `%${searchTerm}%`;
-          rows = stmt.all(like, like, limit) as typeof rows;
-        } else if (key) {
-          const stmt = state.db.prepare(`
-            SELECT key, value, updated_at, session_key FROM memories
-            WHERE session_key = ? AND key = ?
-            ORDER BY updated_at DESC
-            LIMIT ?
-          `);
-          rows = stmt.all(sessionKey, key, limit) as typeof rows;
-        } else if (query) {
-          const stmt = state.db.prepare(`
-            SELECT key, value, updated_at, session_key FROM memories
-            WHERE session_key = ? AND (key LIKE ? OR value LIKE ?)
-            ORDER BY updated_at DESC
-            LIMIT ?
-          `);
-          const like = `%${query}%`;
-          rows = stmt.all(sessionKey, like, like, limit) as typeof rows;
-        } else {
+        // Exact-key lookup — always direct SQL (fastest path)
+        if (key) {
+          if (crossSession) {
+            const stmt = state.db.prepare(`
+              SELECT key, value, updated_at, session_key FROM memories
+              WHERE key = ?
+              ORDER BY updated_at DESC
+              LIMIT ?
+            `);
+            rows = stmt.all(key, limit) as typeof rows;
+          } else {
+            const stmt = state.db.prepare(`
+              SELECT key, value, updated_at, session_key FROM memories
+              WHERE session_key = ? AND key = ?
+              ORDER BY updated_at DESC
+              LIMIT ?
+            `);
+            rows = stmt.all(sessionKey, key, limit) as typeof rows;
+          }
+        }
+        // Query-based recall — FTS5 with stemming when available, LIKE fallback otherwise
+        else if (query && state.cfg.enableFts) {
+          if (crossSession) {
+            // FTS5 across all sessions
+            const stmt = state.db.prepare(`
+              SELECT key, value, updated_at, session_key, rank FROM memories_fts
+              WHERE memories_fts MATCH ?
+              ORDER BY rank
+              LIMIT ?
+            `);
+            rows = stmt.all(query, limit) as Array<{ key: string; value: string; updated_at: number; session_key: string; rank: number }>;
+          } else {
+            // FTS5 + filter to current session
+            const stmt = state.db.prepare(`
+              SELECT key, value, updated_at, session_key, rank FROM memories_fts
+              WHERE memories_fts MATCH ? AND session_key = ?
+              ORDER BY rank
+              LIMIT ?
+            `);
+            rows = stmt.all(query, sessionKey, limit) as Array<{ key: string; value: string; updated_at: number; session_key: string; rank: number }>;
+          }
+        }
+        // Query-based recall — LIKE fallback when FTS is disabled
+        else if (query) {
+          const searchTerm = query;
+          if (crossSession) {
+            const stmt = state.db.prepare(`
+              SELECT key, value, updated_at, session_key FROM memories
+              WHERE (key LIKE ? OR value LIKE ?)
+              ORDER BY updated_at DESC
+              LIMIT ?
+            `);
+            const like = `%${searchTerm}%`;
+            rows = stmt.all(like, like, limit) as typeof rows;
+          } else {
+            const stmt = state.db.prepare(`
+              SELECT key, value, updated_at, session_key FROM memories
+              WHERE session_key = ? AND (key LIKE ? OR value LIKE ?)
+              ORDER BY updated_at DESC
+              LIMIT ?
+            `);
+            const like = `%${searchTerm}%`;
+            rows = stmt.all(sessionKey, like, like, limit) as typeof rows;
+          }
+        }
+        // No params — list all for session
+        else {
           const stmt = state.db.prepare(`
             SELECT key, value, updated_at, session_key FROM memories
             WHERE session_key = ?

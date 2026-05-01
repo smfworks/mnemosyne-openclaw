@@ -256,6 +256,22 @@ mnemosyne-plugin/
 └── tsconfig.json              ← TypeScript config
 ```
 
+## Non-Goals (What This Plugin Does NOT Do)
+
+These features are intentionally excluded to keep Mnemosyne small, safe, and zero-dependency:
+
+| Feature | Status | Rationale |
+|---------|--------|-----------|
+| **Vector embeddings / semantic search** | ❌ Not planned | Requires ML runtime (ONNX/transformers.js) — violates "zero heavy deps" design goal. FTS5 + stemming provides excellent keyword recall without the complexity |
+| **Knowledge graph / entity-relationship DB** | ❌ Not planned | Requires external services (Qdrant, FalkorDB, Neo4j) — violates single-process design. Use a dedicated graph plugin if needed |
+| **LLM-based memory curation** | ❌ Not planned here | Memory consolidation should happen in OpenClaw's dreaming pipeline, not inside the storage plugin |
+| **At-rest encryption (SQLCipher)** | ❌ Not planned | Use OS-level disk encryption (LUKS/FileVault/BitLocker). SQLCipher breaks `better-sqlite3` native compatibility |
+| **npm publishing** | ❌ Not planned | GitHub is the correct distribution channel for OpenClaw plugins. Install via `openclaw plugin load`, not `npm install -g` |
+| **Network-based features** | ❌ By design | Zero outbound calls. The plugin has no `fetch()`, no HTTP, no sockets |
+| **Config hot-reload** | ❌ By design | OpenClaw manages plugin lifecycle. Config changes require gateway restart — this is the correct pattern |
+
+If you need any of these, they should be separate plugins that read from the same SQLite database.
+
 ## Disable / Revert
 
 ```bash
