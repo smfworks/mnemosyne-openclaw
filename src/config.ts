@@ -16,6 +16,8 @@ export interface MnemosyneConfig {
   maxMemoriesPerSession: number;
   /** Whether to enable FTS5 full-text search indexes (default: true) */
   enableFts: boolean;
+  /** SQLite busy timeout in milliseconds */
+  busyTimeoutMs: number;
 }
 
 const DEFAULT_NOISE = [
@@ -51,6 +53,10 @@ export function validateConfig(raw: unknown): MnemosyneConfig {
     10000
   );
   const enableFts = cfg.enableFts !== false;
+  const busyTimeoutMs = Math.min(
+    Math.max(Number(cfg.busyTimeoutMs) || 5000, 100),
+    60000
+  );
 
-  return { dbPath, ownerObserveOthers, noisePatterns, maxMessagesPerSession, maxMemoriesPerSession, enableFts };
+  return { dbPath, ownerObserveOthers, noisePatterns, maxMessagesPerSession, maxMemoriesPerSession, enableFts, busyTimeoutMs };
 }

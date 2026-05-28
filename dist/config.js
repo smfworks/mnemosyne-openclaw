@@ -26,6 +26,7 @@ export function validateConfig(raw) {
     const maxMessagesPerSession = Math.min(Math.max(Number(cfg.maxMessagesPerSession) || 10000, 100), 100000);
     const maxMemoriesPerSession = Math.min(Math.max(Number(cfg.maxMemoriesPerSession) || 1000, 10), 10000);
     const enableFts = cfg.enableFts !== false;
-    return { dbPath, ownerObserveOthers, noisePatterns, maxMessagesPerSession, maxMemoriesPerSession, enableFts };
+    const busyTimeoutMs = Math.min(Math.max(Number(cfg.busyTimeoutMs) || 5000, 100), 60000);
+    return { dbPath, ownerObserveOthers, noisePatterns, maxMessagesPerSession, maxMemoriesPerSession, enableFts, busyTimeoutMs };
 }
 //# sourceMappingURL=config.js.map

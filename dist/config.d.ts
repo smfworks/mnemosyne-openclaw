@@ -15,6 +15,8 @@ export interface MnemosyneConfig {
     maxMemoriesPerSession: number;
     /** Whether to enable FTS5 full-text search indexes (default: true) */
     enableFts: boolean;
+    /** SQLite busy timeout in milliseconds */
+    busyTimeoutMs: number;
 }
 export declare function validateConfig(raw: unknown): MnemosyneConfig;
 //# sourceMappingURL=config.d.ts.map

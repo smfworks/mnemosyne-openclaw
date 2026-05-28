@@ -1,6 +1,6 @@
 # Mnemosyne — Offline Memory Plugin for OpenClaw
 
-> **v1.1.1** — FTS5 full-text search, crash resilience, proper session-scoped tools, and agent-wide explicit memories.
+> **v1.2.0** — production hardening: agent-wide explicit memories, health checks, DB maintenance commands, CI, and install diagnostics.
 
 ## What It Is
 
@@ -14,6 +14,8 @@
 |--------|--------|-------|
 | **Session context** | Tools wrote to ghost `"default_session"` — agents never saw results | Tools receive real `sessionKey`/`agentId` from OpenClaw runtime |
 | **Agent-wide memories** | `scope: "agent"` was documented but behaved like session memory | Agent-scoped memories now follow the same agent across sessions |
+| **Health checks** | Stats only | `/mnemosyne health`, `/mnemosyne vacuum`, and `npm run doctor` |
+| **Production installs** | Node 24 could force native SQLite compilation | Supported production Node range is now `>=22 <24` |
 | **Full-text search** | No cross-session search | `mnemosyne_search` with FTS5 + Porter stemming |
 | **Crash resilience** | No crash recovery | `wal_checkpoint(TRUNCATE)` on every startup |
 | **Error guards** | DB errors propagated raw | Retry on `SQLITE_BUSY` with exponential backoff |
@@ -94,7 +96,7 @@ Mnemosyne adds new tools alongside them:
 ## Installation (Any OpenClaw, Even Offline)
 
 ### Prerequisites
-- Node.js 22+ (tested on v24.14.0)
+- Node.js 22 LTS. `package.json` declares `>=22 <24` because Node 24 may require local `better-sqlite3` compilation until matching prebuilt binaries are available.
 - OpenClaw >= 2026.4.27
 - `python3` and `make` (for better-sqlite3 native compilation)
 
@@ -103,6 +105,7 @@ Mnemosyne adds new tools alongside them:
 git clone https://github.com/smfworks/mnemosyne-openclaw.git
 cd mnemosyne-openclaw
 npm install
+npm run doctor
 npm run build
 ```
 
@@ -151,7 +154,18 @@ Mnemosyne Stats:
 - Sessions: 0
 - DB: /home/.../.openclaw/memory/mnemosyne.db
 - FTS: enabled
+- SQLite quick_check: ok
 ```
+
+### Health and maintenance
+
+```
+/mnemosyne health
+/mnemosyne vacuum
+```
+
+- `health` runs SQLite `quick_check` and a passive WAL checkpoint.
+- `vacuum` runs `incremental_vacuum` and `wal_checkpoint(TRUNCATE)`.
 
 ## Configuration Reference
 
@@ -163,6 +177,7 @@ Mnemosyne Stats:
 | `maxMessagesPerSession` | integer | 10000 | Auto-pruning: keep N most recent messages per session |
 | `maxMemoriesPerSession` | integer | 1000 | Auto-pruning: keep N most recent explicit memories per session |
 | `enableFts` | boolean | `true` | Enable FTS5 full-text search indexes (set to `false` to save disk on resource-constrained deployments) |
+| `busyTimeoutMs` | integer | `5000` | SQLite busy timeout in milliseconds for WAL contention |
 
 ## Built-in Noise Patterns
 - `HEARTBEAT_OK`
@@ -235,6 +250,7 @@ mnemosyne_forget(key="old_fact", scope="all")
 npm install
 npm run check
 npm test
+npm run doctor
 ```
 
 `better-sqlite3` is a native dependency. On Windows, install a Node version with a matching prebuilt `better-sqlite3` binary or install the Visual Studio C++ build tools so `node-gyp` can compile it. If the native binding is unavailable, TypeScript checks still run with:

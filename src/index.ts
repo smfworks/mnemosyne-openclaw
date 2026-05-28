@@ -33,6 +33,11 @@ interface PluginApi {
 
 let _state: ReturnType<typeof createPluginState> | null = null;
 
+function sqliteQuickCheck(): string {
+  const row = _state!.db.prepare(`PRAGMA quick_check`).get() as Record<string, string> | undefined;
+  return row ? Object.values(row)[0] ?? "unknown" : "unknown";
+}
+
 const pluginEntry = {
   id: "mnemosyne",
   name: "Mnemosyne (Offline Memory)",
@@ -80,13 +85,30 @@ const pluginEntry = {
           const msgRow = _state!.db.prepare(`SELECT COUNT(*) as c FROM messages`).get() as {c:number};
           const memRow = _state!.db.prepare(`SELECT COUNT(*) as c FROM memories`).get() as {c:number};
           const sessRow = _state!.db.prepare(`SELECT COUNT(*) as c FROM sessions`).get() as {c:number};
+          const integrity = sqliteQuickCheck();
           return {
-            text: `Mnemosyne Stats:\n- Messages: ${msgRow.c}\n- Memories: ${memRow.c}\n- Sessions: ${sessRow.c}\n- DB: ${_state!.cfg.dbPath}\n- FTS: ${_state!.cfg.enableFts ? "enabled" : "disabled"}`,
+            text: `Mnemosyne Stats:\n- Messages: ${msgRow.c}\n- Memories: ${memRow.c}\n- Sessions: ${sessRow.c}\n- DB: ${_state!.cfg.dbPath}\n- FTS: ${_state!.cfg.enableFts ? "enabled" : "disabled"}\n- SQLite quick_check: ${integrity}`,
+          };
+        }
+
+        if (subcmd === "health") {
+          const integrity = sqliteQuickCheck();
+          const wal = _state!.db.pragma("wal_checkpoint(PASSIVE)") as unknown;
+          return {
+            text: `Mnemosyne Health:\n- SQLite quick_check: ${integrity}\n- WAL checkpoint: ${JSON.stringify(wal)}\n- DB: ${_state!.cfg.dbPath}`,
+          };
+        }
+
+        if (subcmd === "vacuum") {
+          _state!.db.pragma("incremental_vacuum");
+          _state!.db.pragma("wal_checkpoint(TRUNCATE)");
+          return {
+            text: "Mnemosyne maintenance complete: incremental_vacuum and WAL checkpoint(TRUNCATE) finished.",
           };
         }
 
         return {
-          text: `Mnemosyne (offline memory)\n- /mnemosyne stats — show counts\n- tools: mnemosyne_remember, mnemosyne_recall, mnemosyne_search, mnemosyne_list, mnemosyne_forget`,
+          text: `Mnemosyne (offline memory)\n- /mnemosyne stats — show counts and quick_check\n- /mnemosyne health — quick_check plus passive WAL checkpoint\n- /mnemosyne vacuum — incremental vacuum plus WAL truncate checkpoint\n- tools: mnemosyne_remember, mnemosyne_recall, mnemosyne_search, mnemosyne_list, mnemosyne_forget`,
         };
       },
     });

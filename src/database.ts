@@ -26,6 +26,8 @@ export function getDatabase(cfg: MnemosyneConfig): InstanceType<typeof Database>
   _db.pragma("journal_mode = WAL");
   _db.pragma("foreign_keys = ON");
   _db.pragma("auto_vacuum = INCREMENTAL");
+  _db.pragma(`busy_timeout = ${cfg.busyTimeoutMs}`);
+  _db.pragma("synchronous = NORMAL");
 
   // Crash resilience: flush any dangling WAL frames into the main DB
   _db.pragma("wal_checkpoint(TRUNCATE)");

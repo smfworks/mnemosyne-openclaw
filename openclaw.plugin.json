@@ -36,6 +36,18 @@
         "maximum": 10000,
         "default": 1000,
         "description": "Automatic pruning: keep only N most recent explicit memories per session"
+      },
+      "enableFts": {
+        "type": "boolean",
+        "default": true,
+        "description": "Enable SQLite FTS5 indexes for cross-session full-text search"
+      },
+      "busyTimeoutMs": {
+        "type": "integer",
+        "minimum": 100,
+        "maximum": 60000,
+        "default": 5000,
+        "description": "SQLite busy timeout in milliseconds for WAL contention"
       }
     }
   },
