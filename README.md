@@ -1,6 +1,6 @@
 # Mnemosyne — Offline Memory Plugin for OpenClaw
 
-> **v1.1.0** — FTS5 full-text search, crash resilience, and proper session-scoped tools.
+> **v1.1.1** — FTS5 full-text search, crash resilience, proper session-scoped tools, and agent-wide explicit memories.
 
 ## What It Is
 
@@ -13,6 +13,7 @@
 | Change | Before | After |
 |--------|--------|-------|
 | **Session context** | Tools wrote to ghost `"default_session"` — agents never saw results | Tools receive real `sessionKey`/`agentId` from OpenClaw runtime |
+| **Agent-wide memories** | `scope: "agent"` was documented but behaved like session memory | Agent-scoped memories now follow the same agent across sessions |
 | **Full-text search** | No cross-session search | `mnemosyne_search` with FTS5 + Porter stemming |
 | **Crash resilience** | No crash recovery | `wal_checkpoint(TRUNCATE)` on every startup |
 | **Error guards** | DB errors propagated raw | Retry on `SQLITE_BUSY` with exponential backoff |
@@ -49,7 +50,7 @@
 |---------|-------------|
 | **Auto-capture** | `agent_end` hook fires after every successful turn → messages saved to SQLite |
 | **Full-text search** | `mnemosyne_search` — FTS5 with Porter stemming across ALL sessions |
-| **Explicit memory** | `mnemosyne_remember` — store key-value facts scoped to real session |
+| **Explicit memory** | `mnemosyne_remember` — store key-value facts scoped to session or agent |
 | **Cross-session recall** | `mnemosyne_recall(cross_session=true)` — search memories from any session |
 | **List** | `mnemosyne_list` — enumerate all stored memories |
 | **Forget** | `mnemosyne_forget` — delete a memory by key |
@@ -65,6 +66,8 @@
 
 ### `memories` — Explicit key-value stores
 - `session_key + key` — unique composite
+- session-scoped memories use the current OpenClaw `sessionKey`
+- agent-scoped memories use `agent:<agentId>:global`
 - `value`, `timestamp`, `updated_at`
 
 ### `sessions` — Metadata ledger
@@ -172,12 +175,14 @@ Mnemosyne Stats:
 ### Remember
 ```
 mnemosyne_remember(key="user_name", value="Michael", scope="session")
+mnemosyne_remember(key="timezone", value="America/New_York", scope="agent")
 ```
 
 ### Recall by key
 ```
 mnemosyne_recall(key="user_name")
 ```
+By default, recall checks the current session first, then the current agent's agent-wide memory scope.
 
 ### Recall by query
 ```
@@ -201,11 +206,14 @@ mnemosyne_search(query="Italian wine candles", source="all", limit=10)
 ```
 mnemosyne_list(limit=20)
 ```
+Lists current-session memories plus current-agent memories, with scope labels.
 
 ### Forget
 ```
 mnemosyne_forget(key="old_fact")
+mnemosyne_forget(key="old_fact", scope="all")
 ```
+`scope` can be `session`, `agent`, or `all`.
 
 ## Reliability Guarantees
 
@@ -218,6 +226,25 @@ mnemosyne_forget(key="old_fact")
 | Plugin crash on load | Isolated to plugin; gateway stays up; error logged |
 | SQLITE_BUSY (WAL contention) | Retry with exponential backoff (3 attempts, max 500ms) |
 | Large DB (100K+ messages) | Guarded FTS rebuild — near-zero startup after first migration |
+
+## Development Notes
+
+### Build and tests
+
+```bash
+npm install
+npm run check
+npm test
+```
+
+`better-sqlite3` is a native dependency. On Windows, install a Node version with a matching prebuilt `better-sqlite3` binary or install the Visual Studio C++ build tools so `node-gyp` can compile it. If the native binding is unavailable, TypeScript checks still run with:
+
+```bash
+npm install --ignore-scripts
+npm run check
+```
+
+Runtime database tests require the native SQLite binding.
 
 ## Why No HTTP Server?
 

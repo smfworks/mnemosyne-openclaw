@@ -3,8 +3,10 @@ import assert from "node:assert";
 import Database from "better-sqlite3";
 import { mkdirSync, rmSync } from "node:fs";
 import { dirname } from "node:path";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
-const TEST_DB = "/tmp/mnemosyne-test.db";
+const TEST_DB = join(tmpdir(), "mnemosyne-test.db");
 
 function ensureClean() {
   try { rmSync(TEST_DB); } catch { /* not exists */ }

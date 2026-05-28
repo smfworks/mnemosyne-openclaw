@@ -40,9 +40,10 @@
     }
   },
   "scripts": {
-    "build": "tsc",
+    "build": "node ./node_modules/typescript/bin/tsc",
+    "check": "node ./node_modules/typescript/bin/tsc --noEmit",
     "prepublishOnly": "npm run build",
-    "test": "node --test dist/**/*.test.js"
+    "test": "npm run build && node --test tests/*.test.js"
   },
   "keywords": [
     "openclaw",

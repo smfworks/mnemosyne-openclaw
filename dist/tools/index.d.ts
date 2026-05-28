@@ -7,6 +7,8 @@
  */
 import { PluginState } from "../state.js";
 import { ToolRuntimeContext } from "../types/runtime.js";
+type MemoryScope = "session" | "agent";
+type ForgetScope = MemoryScope | "all";
 export declare function registerRememberTool(state: PluginState, toolCtx: ToolRuntimeContext): {
     name: string;
     label: string;
@@ -40,7 +42,7 @@ export declare function registerRememberTool(state: PluginState, toolCtx: ToolRu
         details: {
             key: string;
             value: string;
-            scope: string;
+            scope: MemoryScope;
         };
     }>;
 };
@@ -174,6 +176,12 @@ export declare function registerForgetTool(state: PluginState, toolCtx: ToolRunt
                 type: string;
                 description: string;
             };
+            scope: {
+                type: string;
+                enum: string[];
+                default: string;
+                description: string;
+            };
         };
         required: string[];
     };
@@ -184,8 +192,10 @@ export declare function registerForgetTool(state: PluginState, toolCtx: ToolRunt
         }[];
         details: {
             key: string;
+            scope: ForgetScope;
             deleted: number;
         };
     }>;
 };
+export {};
 //# sourceMappingURL=index.d.ts.map

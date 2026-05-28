@@ -43,6 +43,56 @@ function resolveAgentId(toolCtx: ToolRuntimeContext): string {
   return toolCtx.agentId ?? "main";
 }
 
+type MemoryScope = "session" | "agent";
+type ForgetScope = MemoryScope | "all";
+
+function resolveScopedSessionKey(toolCtx: ToolRuntimeContext, scope: MemoryScope): string {
+  if (scope === "agent") return `agent:${resolveAgentId(toolCtx)}:global`;
+  return resolveSessionKey(toolCtx);
+}
+
+function resolveReadableSessionKeys(toolCtx: ToolRuntimeContext): string[] {
+  const sessionKey = resolveSessionKey(toolCtx);
+  const agentKey = resolveScopedSessionKey(toolCtx, "agent");
+  return sessionKey === agentKey ? [sessionKey] : [sessionKey, agentKey];
+}
+
+function rowScope(toolCtx: ToolRuntimeContext, sessionKey: string): MemoryScope {
+  return sessionKey === resolveScopedSessionKey(toolCtx, "agent") ? "agent" : "session";
+}
+
+function normalizeKey(input: unknown): string {
+  return String(input ?? "").trim().toLowerCase().replace(/\s+/g, "_");
+}
+
+function clampInt(input: unknown, fallback: number, min: number, max: number): number {
+  const n = Number(input);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(Math.max(Math.trunc(n), min), max);
+}
+
+function toFtsQuery(input: string): string {
+  const terms = input
+    .trim()
+    .split(/\s+/)
+    .map((term) => term.replace(/"/g, '""'))
+    .filter(Boolean);
+  return terms.map((term) => `"${term}"`).join(" ");
+}
+
+function refreshMemoryCount(state: PluginState, sessionKey: string, agentId: string, now = Date.now()): void {
+  const row = state.db.prepare(
+    `SELECT COUNT(*) as c FROM memories WHERE session_key = ?`
+  ).get(sessionKey) as { c: number };
+  state.db.prepare(`
+    INSERT INTO sessions (session_key, agent_id, updated_at, memory_count)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(session_key) DO UPDATE SET
+      updated_at = excluded.updated_at,
+      memory_count = excluded.memory_count
+  `).run(sessionKey, agentId, now, row.c);
+}
+
 // ═══════════════════════════════════════════
 // mnemosyne_remember
 // ═══════════════════════════════════════════
@@ -83,14 +133,14 @@ Examples:
       required: ["key", "value"],
     },
     async execute(_toolCallId: string, params: Record<string, unknown>) {
-      const key = String(params.key ?? "").trim().toLowerCase();
+      const key = normalizeKey(params.key);
       const value = String(params.value ?? "").trim();
-      const scope = params.scope === "agent" ? "agent" : "session";
+      const scope: MemoryScope = params.scope === "agent" ? "agent" : "session";
       if (!key || !value) {
         throw new Error("mnemosyne_remember requires 'key' and 'value'");
       }
 
-      const sessionKey = resolveSessionKey(toolCtx);
+      const sessionKey = resolveScopedSessionKey(toolCtx, scope);
       const agentId = resolveAgentId(toolCtx);
 
       return withRetry(() => {
@@ -104,16 +154,6 @@ Examples:
         const now = Date.now();
         stmt.run(sessionKey, agentId, key, value, now, now);
 
-        // Update session stats
-        const sessionStmt = state.db.prepare(`
-          INSERT INTO sessions (session_key, agent_id, updated_at, memory_count)
-          VALUES (?, ?, ?, 1)
-          ON CONFLICT(session_key) DO UPDATE SET
-            updated_at = excluded.updated_at,
-            memory_count = memory_count + 1
-        `);
-        sessionStmt.run(sessionKey, agentId, now);
-
         // Prune excess memories
         const prune = state.db.prepare(`
           DELETE FROM memories
@@ -125,6 +165,7 @@ Examples:
           )
         `);
         prune.run(sessionKey, state.cfg.maxMemoriesPerSession);
+        refreshMemoryCount(state, sessionKey, agentId, now);
 
         return {
           content: [{ type: "text", text: `Remembered: ${key} = ${value} (${scope})` }],
@@ -184,9 +225,11 @@ Examples:
       const key = String(params.key ?? "").trim().toLowerCase();
       const query = String(params.query ?? "").trim().toLowerCase();
       const crossSession = Boolean(params.cross_session);
-      const limit = Math.min(Math.max(Number(params.limit) || 5, 1), 50);
+      const limit = clampInt(params.limit, 5, 1, 50);
 
       const sessionKey = resolveSessionKey(toolCtx);
+      const readableSessionKeys = resolveReadableSessionKeys(toolCtx);
+      const readablePlaceholders = readableSessionKeys.map(() => "?").join(",");
 
       return withRetry(() => {
         let rows: Array<{ key: string; value: string; updated_at: number; session_key: string }>;
@@ -204,15 +247,16 @@ Examples:
           } else {
             const stmt = state.db.prepare(`
               SELECT key, value, updated_at, session_key FROM memories
-              WHERE session_key = ? AND key = ?
-              ORDER BY updated_at DESC
+              WHERE session_key IN (${readablePlaceholders}) AND key = ?
+              ORDER BY CASE WHEN session_key = ? THEN 0 ELSE 1 END, updated_at DESC
               LIMIT ?
             `);
-            rows = stmt.all(sessionKey, key, limit) as typeof rows;
+            rows = stmt.all(...readableSessionKeys, key, sessionKey, limit) as typeof rows;
           }
         }
         // Query-based recall — FTS5 with stemming when available, LIKE fallback otherwise
         else if (query && state.cfg.enableFts) {
+          const ftsQuery = toFtsQuery(query);
           if (crossSession) {
             // FTS5 across all sessions
             const stmt = state.db.prepare(`
@@ -221,16 +265,16 @@ Examples:
               ORDER BY rank
               LIMIT ?
             `);
-            rows = stmt.all(query, limit) as Array<{ key: string; value: string; updated_at: number; session_key: string; rank: number }>;
+            rows = stmt.all(ftsQuery, limit) as Array<{ key: string; value: string; updated_at: number; session_key: string; rank: number }>;
           } else {
             // FTS5 + filter to current session
             const stmt = state.db.prepare(`
               SELECT key, value, updated_at, session_key, rank FROM memories_fts
-              WHERE memories_fts MATCH ? AND session_key = ?
-              ORDER BY rank
+              WHERE memories_fts MATCH ? AND session_key IN (${readablePlaceholders})
+              ORDER BY CASE WHEN session_key = ? THEN 0 ELSE 1 END, rank
               LIMIT ?
             `);
-            rows = stmt.all(query, sessionKey, limit) as Array<{ key: string; value: string; updated_at: number; session_key: string; rank: number }>;
+            rows = stmt.all(ftsQuery, ...readableSessionKeys, sessionKey, limit) as Array<{ key: string; value: string; updated_at: number; session_key: string; rank: number }>;
           }
         }
         // Query-based recall — LIKE fallback when FTS is disabled
@@ -248,23 +292,23 @@ Examples:
           } else {
             const stmt = state.db.prepare(`
               SELECT key, value, updated_at, session_key FROM memories
-              WHERE session_key = ? AND (key LIKE ? OR value LIKE ?)
-              ORDER BY updated_at DESC
+              WHERE session_key IN (${readablePlaceholders}) AND (key LIKE ? OR value LIKE ?)
+              ORDER BY CASE WHEN session_key = ? THEN 0 ELSE 1 END, updated_at DESC
               LIMIT ?
             `);
             const like = `%${searchTerm}%`;
-            rows = stmt.all(sessionKey, like, like, limit) as typeof rows;
+            rows = stmt.all(...readableSessionKeys, like, like, sessionKey, limit) as typeof rows;
           }
         }
         // No params — list all for session
         else {
           const stmt = state.db.prepare(`
             SELECT key, value, updated_at, session_key FROM memories
-            WHERE session_key = ?
-            ORDER BY updated_at DESC
+            WHERE session_key IN (${readablePlaceholders})
+            ORDER BY CASE WHEN session_key = ? THEN 0 ELSE 1 END, updated_at DESC
             LIMIT ?
           `);
-          rows = stmt.all(sessionKey, limit) as typeof rows;
+          rows = stmt.all(...readableSessionKeys, sessionKey, limit) as typeof rows;
         }
 
         if (rows.length === 0) {
@@ -275,7 +319,7 @@ Examples:
         }
 
         const lines = rows.map(
-          (r) => `- ${r.key}: ${r.value}${crossSession ? ` (session: ${r.session_key.slice(0, 20)}…)` : ""}`
+          (r) => `- ${r.key}: ${r.value} (${rowScope(toolCtx, r.session_key)}${crossSession ? `, session: ${r.session_key.slice(0, 20)}…` : ""})`
         );
 
         return {
@@ -333,7 +377,8 @@ Parameters:
       const query = String(params.query ?? "").trim();
       if (!query) throw new Error("mnemosyne_search requires 'query'");
       const source = (params.source === "messages" || params.source === "memories") ? params.source : "all";
-      const limit = Math.min(Math.max(Number(params.limit) || 10, 1), 50);
+      const limit = clampInt(params.limit, 10, 1, 50);
+      const ftsQuery = toFtsQuery(query);
 
       return withRetry(() => {
         const results: Array<{ source: string; text: string; session: string; rank: number }> = [];
@@ -345,7 +390,7 @@ Parameters:
             ORDER BY rank
             LIMIT ?
           `);
-          const msgRows = msgStmt.all(query, limit) as Array<{ content: string; session_key: string; rank: number }>;
+          const msgRows = msgStmt.all(ftsQuery, limit) as Array<{ content: string; session_key: string; rank: number }>;
           for (const r of msgRows) {
             results.push({
               source: "message",
@@ -363,7 +408,7 @@ Parameters:
             ORDER BY rank
             LIMIT ?
           `);
-          const memRows = memStmt.all(query, limit) as Array<{ key: string; value: string; session_key: string; rank: number }>;
+          const memRows = memStmt.all(ftsQuery, limit) as Array<{ key: string; value: string; session_key: string; rank: number }>;
           for (const r of memRows) {
             results.push({
               source: "memory",
@@ -419,23 +464,25 @@ export function registerListTool(state: PluginState, toolCtx: ToolRuntimeContext
       required: [],
     },
     async execute(_toolCallId: string, params: Record<string, unknown>) {
-      const limit = Math.min(Math.max(Number(params.limit) || 20, 1), 100);
+      const limit = clampInt(params.limit, 20, 1, 100);
       const sessionKey = resolveSessionKey(toolCtx);
+      const readableSessionKeys = resolveReadableSessionKeys(toolCtx);
+      const readablePlaceholders = readableSessionKeys.map(() => "?").join(",");
 
       return withRetry(() => {
         const stmt = state.db.prepare(`
-          SELECT key, value, updated_at FROM memories
-          WHERE session_key = ?
-          ORDER BY updated_at DESC
+          SELECT key, value, updated_at, session_key FROM memories
+          WHERE session_key IN (${readablePlaceholders})
+          ORDER BY CASE WHEN session_key = ? THEN 0 ELSE 1 END, updated_at DESC
           LIMIT ?
         `);
-        const rows = stmt.all(sessionKey, limit) as Array<{key:string;value:string;updated_at:number}>;
+        const rows = stmt.all(...readableSessionKeys, sessionKey, limit) as Array<{key:string;value:string;updated_at:number;session_key:string}>;
 
         if (rows.length === 0) {
           return { content: [{ type: "text", text: "No memories stored yet." }], details: { count: 0 } };
         }
 
-        const lines = rows.map((r) => `- ${r.key}: ${r.value}`);
+        const lines = rows.map((r) => `- ${r.key}: ${r.value} (${rowScope(toolCtx, r.session_key)})`);
         return {
           content: [{ type: "text", text: lines.join("\n") }],
           details: { count: rows.length },
@@ -453,7 +500,7 @@ export function registerForgetTool(state: PluginState, toolCtx: ToolRuntimeConte
   return {
     name: "mnemosyne_forget",
     label: "Mnemosyne Forget",
-    description: "Delete a memory by exact key.",
+    description: "Delete a memory by exact key from the current session, agent-wide scope, or both.",
     parameters: {
       type: "object",
       additionalProperties: false,
@@ -462,22 +509,37 @@ export function registerForgetTool(state: PluginState, toolCtx: ToolRuntimeConte
           type: "string",
           description: "Exact key to delete",
         },
+        scope: {
+          type: "string",
+          enum: ["session", "agent", "all"],
+          default: "session",
+          description: "Which scope to delete from. 'all' deletes both current-session and agent-wide memories.",
+        },
       },
       required: ["key"],
     },
     async execute(_toolCallId: string, params: Record<string, unknown>) {
-      const key = String(params.key ?? "").trim().toLowerCase();
+      const key = normalizeKey(params.key);
+      const scope: ForgetScope = params.scope === "agent" || params.scope === "all" ? params.scope : "session";
       if (!key) throw new Error("mnemosyne_forget requires 'key'");
 
       const sessionKey = resolveSessionKey(toolCtx);
+      const agentId = resolveAgentId(toolCtx);
+      const targetKeys = scope === "all"
+        ? resolveReadableSessionKeys(toolCtx)
+        : [resolveScopedSessionKey(toolCtx, scope)];
+      const placeholders = targetKeys.map(() => "?").join(",");
 
       return withRetry(() => {
-        const stmt = state.db.prepare(`DELETE FROM memories WHERE session_key = ? AND key = ?`);
-        const info = stmt.run(sessionKey, key);
+        const stmt = state.db.prepare(`DELETE FROM memories WHERE session_key IN (${placeholders}) AND key = ?`);
+        const info = stmt.run(...targetKeys, key);
+        for (const targetKey of targetKeys) {
+          refreshMemoryCount(state, targetKey, agentId);
+        }
 
         return {
-          content: [{ type: "text", text: `Deleted ${info.changes} memory.` }],
-          details: { key, deleted: info.changes },
+          content: [{ type: "text", text: `Deleted ${info.changes} memory from ${scope} scope.` }],
+          details: { key, scope, deleted: info.changes },
         };
       });
     },
