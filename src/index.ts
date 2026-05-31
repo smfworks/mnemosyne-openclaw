@@ -6,6 +6,7 @@
  */
 import { createPluginState } from "./state.js";
 import { onAgentEnd } from "./hooks/capture.js";
+import { closeDatabase } from "./database.js";
 import {
   registerRememberTool,
   registerRecallTool,
@@ -81,25 +82,35 @@ const pluginEntry = {
         const args = ctx.args?.trim().split(/\s+/) ?? [];
         const subcmd = args[0]?.toLowerCase();
 
+        // Authorization: an undefined scope list means a local/trusted invocation
+        // (e.g. the CLI). A defined scope list means a gateway client — require an
+        // explicit admin/owner scope before exposing maintenance actions or the
+        // absolute DB path.
+        const scopes = ctx.gatewayClientScopes;
+        const trusted = !scopes || scopes.some((s) => s === "admin" || s === "owner" || s === "mnemosyne:admin");
+        const dbDisplay = trusted ? _state!.cfg.dbPath : (_state!.cfg.dbPath.split(/[\\/]/).pop() ?? "mnemosyne.db");
+
         if (subcmd === "stats") {
           const msgRow = _state!.db.prepare(`SELECT COUNT(*) as c FROM messages`).get() as {c:number};
           const memRow = _state!.db.prepare(`SELECT COUNT(*) as c FROM memories`).get() as {c:number};
           const sessRow = _state!.db.prepare(`SELECT COUNT(*) as c FROM sessions`).get() as {c:number};
           const integrity = sqliteQuickCheck();
           return {
-            text: `Mnemosyne Stats:\n- Messages: ${msgRow.c}\n- Memories: ${memRow.c}\n- Sessions: ${sessRow.c}\n- DB: ${_state!.cfg.dbPath}\n- FTS: ${_state!.cfg.enableFts ? "enabled" : "disabled"}\n- SQLite quick_check: ${integrity}`,
+            text: `Mnemosyne Stats:\n- Messages: ${msgRow.c}\n- Memories: ${memRow.c}\n- Sessions: ${sessRow.c}\n- DB: ${dbDisplay}\n- FTS: ${_state!.cfg.enableFts ? "enabled" : "disabled"}\n- SQLite quick_check: ${integrity}`,
           };
         }
 
         if (subcmd === "health") {
+          if (!trusted) return { text: "Mnemosyne: 'health' requires an admin/owner scope." };
           const integrity = sqliteQuickCheck();
           const wal = _state!.db.pragma("wal_checkpoint(PASSIVE)") as unknown;
           return {
-            text: `Mnemosyne Health:\n- SQLite quick_check: ${integrity}\n- WAL checkpoint: ${JSON.stringify(wal)}\n- DB: ${_state!.cfg.dbPath}`,
+            text: `Mnemosyne Health:\n- SQLite quick_check: ${integrity}\n- WAL checkpoint: ${JSON.stringify(wal)}\n- DB: ${dbDisplay}`,
           };
         }
 
         if (subcmd === "vacuum") {
+          if (!trusted) return { text: "Mnemosyne: 'vacuum' requires an admin/owner scope." };
           _state!.db.pragma("incremental_vacuum");
           _state!.db.pragma("wal_checkpoint(TRUNCATE)");
           return {
@@ -131,16 +142,21 @@ const pluginEntry = {
     });
 
     // 6. Register lifecycle hooks (id required for validation)
+    const thisInstance = _state;
     api.registerRuntimeLifecycle({
       id: "mnemosyne-lifecycle",
       onPluginUnload() {
         api.logger.info("[mnemosyne] Unloading...");
-        import("./database.js").then(({ closeDatabase }) => {
+        try {
           closeDatabase();
+        } catch (err) {
+          api.logger.error(`[mnemosyne] close error: ${err}`);
+        }
+        // Only clear global state if it still points at THIS instance, so a
+        // concurrent reload that already installed a newer state isn't clobbered.
+        if (_state === thisInstance) {
           _state = null;
-        }).catch(() => {
-          _state = null;
-        });
+        }
       },
     });
 

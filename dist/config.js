@@ -12,7 +12,12 @@ const DEFAULT_NOISE = [
 function resolveDbPath(input) {
     const raw = typeof input === "string" && input.trim() ? input.trim() : "~/.openclaw/memory/mnemosyne.db";
     if (raw.startsWith("~/")) {
-        const home = process.env.HOME || process.env.USERPROFILE || "/tmp";
+        const home = process.env.HOME || process.env.USERPROFILE;
+        if (!home) {
+            // Fail closed rather than dropping the memory DB (captured conversations +
+            // memories) into a potentially world-readable /tmp on a misconfigured host.
+            throw new Error("Mnemosyne: cannot expand '~' in dbPath — neither HOME nor USERPROFILE is set. Configure an absolute dbPath.");
+        }
         return raw.replace("~/", `${home}/`);
     }
     return raw;

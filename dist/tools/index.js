@@ -1,4 +1,17 @@
 // ── Error guards ──
+/** Sleep synchronously without a CPU spin loop, using Atomics.wait on a throwaway buffer. */
+function sleepSync(ms) {
+    if (ms <= 0)
+        return;
+    try {
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+    }
+    catch {
+        // SharedArrayBuffer unavailable (rare hardened runtime) — fall back to a bounded spin.
+        const start = Date.now();
+        while (Date.now() - start < ms) { /* fallback */ }
+    }
+}
 /** Check if an error is a transient SQLITE_BUSY (WAL contention) */
 function isBusyError(err) {
     if (!(err instanceof Error))
@@ -14,10 +27,9 @@ function withRetry(fn, maxRetries = 3) {
         catch (err) {
             if (i === maxRetries || !isBusyError(err))
                 throw err;
-            // small backoff before retry
+            // Non-blocking-of-CPU backoff: park the thread without burning a spin loop.
             const ms = Math.min(100 * Math.pow(2, i), 500);
-            const start = Date.now();
-            while (Date.now() - start < ms) { /* spin */ }
+            sleepSync(ms);
         }
     }
     throw new Error("unreachable");
@@ -26,6 +38,9 @@ function withRetry(fn, maxRetries = 3) {
 function resolveSessionKey(toolCtx) {
     if (toolCtx.sessionKey)
         return toolCtx.sessionKey;
+    const sessionId = typeof toolCtx.sessionId === "string" ? toolCtx.sessionId : undefined;
+    if (sessionId)
+        return sessionId;
     return `agent_${toolCtx.agentId ?? "main"}_default`;
 }
 function resolveAgentId(toolCtx) {
@@ -135,7 +150,7 @@ Examples:
             SELECT id FROM memories
             WHERE session_key = ?
             ORDER BY updated_at DESC
-            OFFSET ?
+            LIMIT -1 OFFSET ?
           )
         `);
                 prune.run(sessionKey, state.cfg.maxMemoriesPerSession);
@@ -193,11 +208,12 @@ Examples:
             required: [],
         },
         async execute(_toolCallId, params) {
-            const key = String(params.key ?? "").trim().toLowerCase();
+            const key = normalizeKey(params.key);
             const query = String(params.query ?? "").trim().toLowerCase();
             const crossSession = Boolean(params.cross_session);
             const limit = clampInt(params.limit, 5, 1, 50);
             const sessionKey = resolveSessionKey(toolCtx);
+            const agentId = resolveAgentId(toolCtx);
             const readableSessionKeys = resolveReadableSessionKeys(toolCtx);
             const readablePlaceholders = readableSessionKeys.map(() => "?").join(",");
             return withRetry(() => {
@@ -205,13 +221,14 @@ Examples:
                 // Exact-key lookup — always direct SQL (fastest path)
                 if (key) {
                     if (crossSession) {
+                        // Cross-session, but still scoped to THIS agent (never leak other agents' memories)
                         const stmt = state.db.prepare(`
               SELECT key, value, updated_at, session_key FROM memories
-              WHERE key = ?
+              WHERE key = ? AND agent_id = ?
               ORDER BY updated_at DESC
               LIMIT ?
             `);
-                        rows = stmt.all(key, limit);
+                        rows = stmt.all(key, agentId, limit);
                     }
                     else {
                         const stmt = state.db.prepare(`
@@ -227,14 +244,15 @@ Examples:
                 else if (query && state.cfg.enableFts) {
                     const ftsQuery = toFtsQuery(query);
                     if (crossSession) {
-                        // FTS5 across all sessions
+                        // FTS5 across this agent's sessions only (join base table to filter by agent_id)
                         const stmt = state.db.prepare(`
-              SELECT key, value, updated_at, session_key, rank FROM memories_fts
-              WHERE memories_fts MATCH ?
-              ORDER BY rank
+              SELECT m.key AS key, m.value AS value, m.updated_at AS updated_at, m.session_key AS session_key, memories_fts.rank AS rank
+              FROM memories_fts JOIN memories m ON m.id = memories_fts.rowid
+              WHERE memories_fts MATCH ? AND m.agent_id = ?
+              ORDER BY memories_fts.rank
               LIMIT ?
             `);
-                        rows = stmt.all(ftsQuery, limit);
+                        rows = stmt.all(ftsQuery, agentId, limit);
                     }
                     else {
                         // FTS5 + filter to current session
@@ -253,12 +271,12 @@ Examples:
                     if (crossSession) {
                         const stmt = state.db.prepare(`
               SELECT key, value, updated_at, session_key FROM memories
-              WHERE (key LIKE ? OR value LIKE ?)
+              WHERE agent_id = ? AND (key LIKE ? OR value LIKE ?)
               ORDER BY updated_at DESC
               LIMIT ?
             `);
                         const like = `%${searchTerm}%`;
-                        rows = stmt.all(like, like, limit);
+                        rows = stmt.all(agentId, like, like, limit);
                     }
                     else {
                         const stmt = state.db.prepare(`
@@ -344,40 +362,85 @@ Parameters:
             const source = (params.source === "messages" || params.source === "memories") ? params.source : "all";
             const limit = clampInt(params.limit, 10, 1, 50);
             const ftsQuery = toFtsQuery(query);
+            const agentId = resolveAgentId(toolCtx);
+            const ftsEnabled = state.cfg.enableFts !== false;
             return withRetry(() => {
                 const results = [];
                 if (source === "all" || source === "messages") {
-                    const msgStmt = state.db.prepare(`
-            SELECT content, session_key, rank FROM messages_fts
-            WHERE messages_fts MATCH ?
-            ORDER BY rank
-            LIMIT ?
-          `);
-                    const msgRows = msgStmt.all(ftsQuery, limit);
-                    for (const r of msgRows) {
-                        results.push({
-                            source: "message",
-                            text: r.content.length > 200 ? r.content.slice(0, 200) + "…" : r.content,
-                            session: r.session_key.slice(0, 24),
-                            rank: r.rank,
-                        });
+                    if (ftsEnabled) {
+                        // Join base table so results stay scoped to THIS agent (no cross-agent leakage)
+                        const msgStmt = state.db.prepare(`
+              SELECT m.content AS content, m.session_key AS session_key, messages_fts.rank AS rank
+              FROM messages_fts JOIN messages m ON m.id = messages_fts.rowid
+              WHERE messages_fts MATCH ? AND m.agent_id = ?
+              ORDER BY messages_fts.rank
+              LIMIT ?
+            `);
+                        const msgRows = msgStmt.all(ftsQuery, agentId, limit);
+                        for (const r of msgRows) {
+                            results.push({
+                                source: "message",
+                                text: r.content.length > 200 ? r.content.slice(0, 200) + "…" : r.content,
+                                session: r.session_key.slice(0, 24),
+                                rank: r.rank,
+                            });
+                        }
+                    }
+                    else {
+                        // FTS disabled — LIKE fallback (rank 0; ordered by recency)
+                        const msgStmt = state.db.prepare(`
+              SELECT content, session_key, timestamp FROM messages
+              WHERE agent_id = ? AND content LIKE ?
+              ORDER BY timestamp DESC
+              LIMIT ?
+            `);
+                        const msgRows = msgStmt.all(agentId, `%${query}%`, limit);
+                        for (const r of msgRows) {
+                            results.push({
+                                source: "message",
+                                text: r.content.length > 200 ? r.content.slice(0, 200) + "…" : r.content,
+                                session: r.session_key.slice(0, 24),
+                                rank: 0,
+                            });
+                        }
                     }
                 }
                 if (source === "all" || source === "memories") {
-                    const memStmt = state.db.prepare(`
-            SELECT key, value, session_key, rank FROM memories_fts
-            WHERE memories_fts MATCH ?
-            ORDER BY rank
-            LIMIT ?
-          `);
-                    const memRows = memStmt.all(ftsQuery, limit);
-                    for (const r of memRows) {
-                        results.push({
-                            source: "memory",
-                            text: `${r.key}: ${r.value}`,
-                            session: r.session_key.slice(0, 24),
-                            rank: r.rank,
-                        });
+                    if (ftsEnabled) {
+                        const memStmt = state.db.prepare(`
+              SELECT m.key AS key, m.value AS value, m.session_key AS session_key, memories_fts.rank AS rank
+              FROM memories_fts JOIN memories m ON m.id = memories_fts.rowid
+              WHERE memories_fts MATCH ? AND m.agent_id = ?
+              ORDER BY memories_fts.rank
+              LIMIT ?
+            `);
+                        const memRows = memStmt.all(ftsQuery, agentId, limit);
+                        for (const r of memRows) {
+                            results.push({
+                                source: "memory",
+                                text: `${r.key}: ${r.value}`,
+                                session: r.session_key.slice(0, 24),
+                                rank: r.rank,
+                            });
+                        }
+                    }
+                    else {
+                        const memStmt = state.db.prepare(`
+              SELECT key, value, session_key, updated_at FROM memories
+              WHERE agent_id = ? AND (key LIKE ? OR value LIKE ?)
+              ORDER BY updated_at DESC
+              LIMIT ?
+            `);
+                        const like = `%${query}%`;
+                        const memRows = memStmt.all(agentId, like, like, limit);
+                        for (const r of memRows) {
+                            results.push({
+                                source: "memory",
+                                text: `${r.key}: ${r.value}`,
+                                session: r.session_key.slice(0, 24),
+                                rank: 0,
+                            });
+                        }
                     }
                 }
                 // Sort combined results by rank and trim

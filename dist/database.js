@@ -7,6 +7,7 @@ import Database from "better-sqlite3";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 let _db = null;
+let _dbPath = null;
 function ensureDir(p) {
     try {
         mkdirSync(p, { recursive: true });
@@ -14,11 +15,19 @@ function ensureDir(p) {
     catch { /* already exists */ }
 }
 export function getDatabase(cfg) {
-    if (_db)
+    if (_db) {
+        // The connection is a process-level singleton. Reject a second init that
+        // asks for a DIFFERENT dbPath rather than silently handing back the wrong
+        // database (which would defeat configured storage isolation).
+        if (_dbPath !== null && cfg.dbPath !== _dbPath) {
+            throw new Error(`Mnemosyne: database already initialized at '${_dbPath}'; refusing to reuse it for a different dbPath '${cfg.dbPath}'. Close the existing database first.`);
+        }
         return _db;
+    }
     const dir = dirname(cfg.dbPath);
     ensureDir(dir);
     _db = new Database(cfg.dbPath);
+    _dbPath = cfg.dbPath;
     _db.pragma("journal_mode = WAL");
     _db.pragma("foreign_keys = ON");
     _db.pragma("auto_vacuum = INCREMENTAL");
@@ -61,6 +70,12 @@ export function getDatabase(cfg) {
       updated_at  INTEGER NOT NULL DEFAULT (unixepoch()*1000),
       message_count INTEGER DEFAULT 0,
       memory_count  INTEGER DEFAULT 0
+    );
+  `);
+    _db.exec(`
+    CREATE TABLE IF NOT EXISTS mnemosyne_meta (
+      key   TEXT PRIMARY KEY,
+      value TEXT NOT NULL
     );
   `);
     // === FTS5 Full-Text Search ===
@@ -119,14 +134,21 @@ export function getDatabase(cfg) {
         VALUES ('delete', old.id, old.key, old.value, old.session_key);
       END;
     `);
-        // Rebuild FTS index only if empty (avoid startup delay on large DBs after first migration)
-        const ftsMsgCount = _db.prepare(`SELECT COUNT(*) as c FROM messages_fts`).get();
-        if (ftsMsgCount.c === 0) {
+        // Rebuild FTS exactly once — when the index is first created or its schema
+        // version changes. We key off an explicit meta version rather than COUNT(*)
+        // on the external-content virtual table: that count reflects the SOURCE
+        // table's rows even when the FTS index itself is empty, so a DB migrated
+        // from enableFts=false would otherwise leave its history permanently
+        // unsearchable by MATCH.
+        const FTS_VERSION = "1";
+        const builtRow = _db.prepare(`SELECT value FROM mnemosyne_meta WHERE key = 'fts_version'`).get();
+        if (!builtRow || builtRow.value !== FTS_VERSION) {
             _db.prepare(`INSERT INTO messages_fts(messages_fts) VALUES (?)`).run("rebuild");
-        }
-        const ftsMemCount = _db.prepare(`SELECT COUNT(*) as c FROM memories_fts`).get();
-        if (ftsMemCount.c === 0) {
             _db.prepare(`INSERT INTO memories_fts(memories_fts) VALUES (?)`).run("rebuild");
+            _db.prepare(`
+        INSERT INTO mnemosyne_meta(key, value) VALUES ('fts_version', ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+      `).run(FTS_VERSION);
         }
     }
     return _db;
@@ -135,6 +157,7 @@ export function closeDatabase() {
     if (_db) {
         _db.close();
         _db = null;
+        _dbPath = null;
     }
 }
 //# sourceMappingURL=database.js.map

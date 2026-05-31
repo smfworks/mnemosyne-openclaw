@@ -18,6 +18,7 @@ export declare function onAgentEnd(event: {
     durationMs?: number;
 }, ctx: {
     sessionKey?: string;
+    sessionId?: string;
     agentId?: string;
     runId?: string;
 }, state: PluginState): Promise<void>;

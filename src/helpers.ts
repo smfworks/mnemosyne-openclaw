@@ -2,8 +2,9 @@
  * Helper utilities: session key building, noise filtering, message extraction.
  */
 
-export function buildSessionKey(ctx: { sessionKey?: string; agentId?: string }): string {
+export function buildSessionKey(ctx: { sessionKey?: string; sessionId?: string; agentId?: string }): string {
   if (ctx.sessionKey) return ctx.sessionKey;
+  if (ctx.sessionId) return ctx.sessionId;
   return `agent_${ctx.agentId ?? "main"}_default`;
 }
 
@@ -12,7 +13,9 @@ export function isNoise(text: string, patterns: string[]): boolean {
   const t = text.trim();
   if (!t) return true;
   for (const p of patterns) {
-    if (t.includes(p)) return true;
+    // Anchored match: only drop turns that START with a noise marker, so a real
+    // turn that merely quotes "[system]" or "[heartbeat]" mid-text is preserved.
+    if (t.startsWith(p)) return true;
   }
   return false;
 }
@@ -45,6 +48,11 @@ export function extractMessages(
         ? "system"
         : "assistant";
 
+    // Do not persist system-role messages: system prompts / injected system
+    // content can carry sensitive instructions or secrets that would otherwise
+    // become locally searchable via FTS and recall.
+    if (role === "system") continue;
+
     let content = "";
     if (typeof msg.content === "string") {
       content = msg.content;
@@ -65,8 +73,20 @@ export function extractMessages(
     out.push({
       role,
       content,
-      timestamp: typeof msg.timestamp === "number" ? msg.timestamp : Date.now(),
+      timestamp: sanitizeTimestamp(msg.timestamp),
     });
   }
   return out;
+}
+
+/**
+ * Accept only a finite timestamp within a sane window (not negative, not far in
+ * the future). Out-of-range values fall back to now so they can't corrupt the
+ * timestamp-ordered prune. One day of forward skew is tolerated for clock drift.
+ */
+function sanitizeTimestamp(input: unknown): number {
+  const now = Date.now();
+  if (typeof input !== "number" || !Number.isFinite(input)) return now;
+  if (input <= 0 || input > now + 24 * 60 * 60 * 1000) return now;
+  return Math.trunc(input);
 }

@@ -27,3 +27,6 @@ Thumbs.db
 
 # Debug
 npm-debug.log*
+
+# clawreview local review state
+.clawreview/

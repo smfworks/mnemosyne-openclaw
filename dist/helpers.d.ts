@@ -3,6 +3,7 @@
  */
 export declare function buildSessionKey(ctx: {
     sessionKey?: string;
+    sessionId?: string;
     agentId?: string;
 }): string;
 export declare function isNoise(text: string, patterns: string[]): boolean;

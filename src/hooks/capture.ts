@@ -23,7 +23,7 @@ export function registerCaptureHook(api: CaptureApi, state: PluginState): void {
 /** The actual hook handler called by api.on('agent_end', ...) */
 export async function onAgentEnd(
   event: { success: boolean; messages?: unknown[]; durationMs?: number },
-  ctx: { sessionKey?: string; agentId?: string; runId?: string },
+  ctx: { sessionKey?: string; sessionId?: string; agentId?: string; runId?: string },
   state: PluginState
 ): Promise<void> {
   if (!event.success || !event.messages?.length) return;
@@ -59,15 +59,17 @@ export async function onAgentEnd(
     updateSessionStmt.run(sessionKey, agentId, now, extracted.length);
   })();
 
-  // Prune if over limit — two-step for SQLite compatibility
-  const keepRows = state.db.prepare(
-    `SELECT id FROM messages WHERE session_key = ? ORDER BY timestamp DESC LIMIT ?`
-  ).all(sessionKey, state.cfg.maxMessagesPerSession) as Array<{ id: number }>;
-  const keepIds = keepRows.map((r) => r.id);
-  if (keepIds.length >= state.cfg.maxMessagesPerSession) {
-    const placeholders = keepIds.map(() => "?").join(",");
-    state.db.prepare(
-      `DELETE FROM messages WHERE session_key = ? AND id NOT IN (${placeholders})`
-    ).run(sessionKey, ...keepIds);
-  }
+  // Prune if over limit — single bounded DELETE with no per-id bind parameters,
+  // so a large session can never exceed SQLite's host-parameter ceiling. The
+  // secondary id sort makes the keep-set deterministic when timestamps collide.
+  state.db.prepare(`
+    DELETE FROM messages
+    WHERE session_key = ?
+      AND id NOT IN (
+        SELECT id FROM messages
+        WHERE session_key = ?
+        ORDER BY timestamp DESC, id DESC
+        LIMIT ?
+      )
+  `).run(sessionKey, sessionKey, state.cfg.maxMessagesPerSession);
 }
