@@ -4,11 +4,15 @@
  *
  * Each tool factory receives the OpenClaw runtime context (sessionKey, agentId, sandboxed)
  * so that memories are scoped to the actual session, not a hardcoded default.
+ *
+ * These tools issue NO SQL directly: all content-table access goes through a
+ * {@link ScopedStore} (see src/dal.ts), which binds every query to the caller's
+ * agent/session. That keeps cross-agent isolation a structural property instead
+ * of a per-query convention that a future edit could forget.
  */
 import { PluginState } from "../state.js";
 import { ToolRuntimeContext } from "../types/runtime.js";
-type MemoryScope = "session" | "agent";
-type ForgetScope = MemoryScope | "all";
+import { MemoryScope, ForgetScope } from "../dal.js";
 export declare function registerRememberTool(state: PluginState, toolCtx: ToolRuntimeContext): {
     name: string;
     label: string;
@@ -197,5 +201,4 @@ export declare function registerForgetTool(state: PluginState, toolCtx: ToolRunt
         };
     }>;
 };
-export {};
 //# sourceMappingURL=index.d.ts.map

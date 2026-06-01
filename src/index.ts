@@ -7,6 +7,7 @@
 import { createPluginState } from "./state.js";
 import { onAgentEnd } from "./hooks/capture.js";
 import { closeDatabase } from "./database.js";
+import { globalCounts } from "./dal.js";
 import {
   registerRememberTool,
   registerRecallTool,
@@ -91,12 +92,10 @@ const pluginEntry = {
         const dbDisplay = trusted ? _state!.cfg.dbPath : (_state!.cfg.dbPath.split(/[\\/]/).pop() ?? "mnemosyne.db");
 
         if (subcmd === "stats") {
-          const msgRow = _state!.db.prepare(`SELECT COUNT(*) as c FROM messages`).get() as {c:number};
-          const memRow = _state!.db.prepare(`SELECT COUNT(*) as c FROM memories`).get() as {c:number};
-          const sessRow = _state!.db.prepare(`SELECT COUNT(*) as c FROM sessions`).get() as {c:number};
+          const counts = globalCounts(_state!);
           const integrity = sqliteQuickCheck();
           return {
-            text: `Mnemosyne Stats:\n- Messages: ${msgRow.c}\n- Memories: ${memRow.c}\n- Sessions: ${sessRow.c}\n- DB: ${dbDisplay}\n- FTS: ${_state!.cfg.enableFts ? "enabled" : "disabled"}\n- SQLite quick_check: ${integrity}`,
+            text: `Mnemosyne Stats:\n- Messages: ${counts.messages}\n- Memories: ${counts.memories}\n- Sessions: ${counts.sessions}\n- DB: ${dbDisplay}\n- FTS: ${_state!.cfg.enableFts ? "enabled" : "disabled"}\n- SQLite quick_check: ${integrity}`,
           };
         }
 
