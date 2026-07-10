@@ -1,3 +1,4 @@
+import { ScopedStore } from "../dal.js";
 // ── Error guards ──
 /** Sleep synchronously without a CPU spin loop, using Atomics.wait on a throwaway buffer. */
 function sleepSync(ms) {
@@ -46,18 +47,8 @@ function resolveSessionKey(toolCtx) {
 function resolveAgentId(toolCtx) {
     return toolCtx.agentId ?? "main";
 }
-function resolveScopedSessionKey(toolCtx, scope) {
-    if (scope === "agent")
-        return `agent:${resolveAgentId(toolCtx)}:global`;
-    return resolveSessionKey(toolCtx);
-}
-function resolveReadableSessionKeys(toolCtx) {
-    const sessionKey = resolveSessionKey(toolCtx);
-    const agentKey = resolveScopedSessionKey(toolCtx, "agent");
-    return sessionKey === agentKey ? [sessionKey] : [sessionKey, agentKey];
-}
-function rowScope(toolCtx, sessionKey) {
-    return sessionKey === resolveScopedSessionKey(toolCtx, "agent") ? "agent" : "session";
+function storeFor(state, toolCtx) {
+    return new ScopedStore(state, resolveAgentId(toolCtx), resolveSessionKey(toolCtx));
 }
 function normalizeKey(input) {
     return String(input ?? "").trim().toLowerCase().replace(/\s+/g, "_");
@@ -67,24 +58,6 @@ function clampInt(input, fallback, min, max) {
     if (!Number.isFinite(n))
         return fallback;
     return Math.min(Math.max(Math.trunc(n), min), max);
-}
-function toFtsQuery(input) {
-    const terms = input
-        .trim()
-        .split(/\s+/)
-        .map((term) => term.replace(/"/g, '""'))
-        .filter(Boolean);
-    return terms.map((term) => `"${term}"`).join(" ");
-}
-function refreshMemoryCount(state, sessionKey, agentId, now = Date.now()) {
-    const row = state.db.prepare(`SELECT COUNT(*) as c FROM memories WHERE session_key = ?`).get(sessionKey);
-    state.db.prepare(`
-    INSERT INTO sessions (session_key, agent_id, updated_at, memory_count)
-    VALUES (?, ?, ?, ?)
-    ON CONFLICT(session_key) DO UPDATE SET
-      updated_at = excluded.updated_at,
-      memory_count = excluded.memory_count
-  `).run(sessionKey, agentId, now, row.c);
 }
 // ═══════════════════════════════════════════
 // mnemosyne_remember
@@ -131,30 +104,9 @@ Examples:
             if (!key || !value) {
                 throw new Error("mnemosyne_remember requires 'key' and 'value'");
             }
-            const sessionKey = resolveScopedSessionKey(toolCtx, scope);
-            const agentId = resolveAgentId(toolCtx);
+            const store = storeFor(state, toolCtx);
             return withRetry(() => {
-                const stmt = state.db.prepare(`
-          INSERT INTO memories (session_key, agent_id, key, value, timestamp, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?)
-          ON CONFLICT(session_key, key) DO UPDATE SET
-            value = excluded.value,
-            updated_at = excluded.updated_at
-        `);
-                const now = Date.now();
-                stmt.run(sessionKey, agentId, key, value, now, now);
-                // Prune excess memories
-                const prune = state.db.prepare(`
-          DELETE FROM memories
-          WHERE id IN (
-            SELECT id FROM memories
-            WHERE session_key = ?
-            ORDER BY updated_at DESC
-            LIMIT -1 OFFSET ?
-          )
-        `);
-                prune.run(sessionKey, state.cfg.maxMemoriesPerSession);
-                refreshMemoryCount(state, sessionKey, agentId, now);
+                store.rememberMemory(scope, key, value);
                 return {
                     content: [{ type: "text", text: `Remembered: ${key} = ${value} (${scope})` }],
                     details: { key, value, scope },
@@ -212,100 +164,21 @@ Examples:
             const query = String(params.query ?? "").trim().toLowerCase();
             const crossSession = Boolean(params.cross_session);
             const limit = clampInt(params.limit, 5, 1, 50);
-            const sessionKey = resolveSessionKey(toolCtx);
-            const agentId = resolveAgentId(toolCtx);
-            const readableSessionKeys = resolveReadableSessionKeys(toolCtx);
-            const readablePlaceholders = readableSessionKeys.map(() => "?").join(",");
+            const store = storeFor(state, toolCtx);
             return withRetry(() => {
-                let rows;
-                // Exact-key lookup — always direct SQL (fastest path)
-                if (key) {
-                    if (crossSession) {
-                        // Cross-session, but still scoped to THIS agent (never leak other agents' memories)
-                        const stmt = state.db.prepare(`
-              SELECT key, value, updated_at, session_key FROM memories
-              WHERE key = ? AND agent_id = ?
-              ORDER BY updated_at DESC
-              LIMIT ?
-            `);
-                        rows = stmt.all(key, agentId, limit);
-                    }
-                    else {
-                        const stmt = state.db.prepare(`
-              SELECT key, value, updated_at, session_key FROM memories
-              WHERE session_key IN (${readablePlaceholders}) AND key = ?
-              ORDER BY CASE WHEN session_key = ? THEN 0 ELSE 1 END, updated_at DESC
-              LIMIT ?
-            `);
-                        rows = stmt.all(...readableSessionKeys, key, sessionKey, limit);
-                    }
-                }
-                // Query-based recall — FTS5 with stemming when available, LIKE fallback otherwise
-                else if (query && state.cfg.enableFts) {
-                    const ftsQuery = toFtsQuery(query);
-                    if (crossSession) {
-                        // FTS5 across this agent's sessions only (join base table to filter by agent_id)
-                        const stmt = state.db.prepare(`
-              SELECT m.key AS key, m.value AS value, m.updated_at AS updated_at, m.session_key AS session_key, memories_fts.rank AS rank
-              FROM memories_fts JOIN memories m ON m.id = memories_fts.rowid
-              WHERE memories_fts MATCH ? AND m.agent_id = ?
-              ORDER BY memories_fts.rank
-              LIMIT ?
-            `);
-                        rows = stmt.all(ftsQuery, agentId, limit);
-                    }
-                    else {
-                        // FTS5 + filter to current session
-                        const stmt = state.db.prepare(`
-              SELECT key, value, updated_at, session_key, rank FROM memories_fts
-              WHERE memories_fts MATCH ? AND session_key IN (${readablePlaceholders})
-              ORDER BY CASE WHEN session_key = ? THEN 0 ELSE 1 END, rank
-              LIMIT ?
-            `);
-                        rows = stmt.all(ftsQuery, ...readableSessionKeys, sessionKey, limit);
-                    }
-                }
-                // Query-based recall — LIKE fallback when FTS is disabled
-                else if (query) {
-                    const searchTerm = query;
-                    if (crossSession) {
-                        const stmt = state.db.prepare(`
-              SELECT key, value, updated_at, session_key FROM memories
-              WHERE agent_id = ? AND (key LIKE ? OR value LIKE ?)
-              ORDER BY updated_at DESC
-              LIMIT ?
-            `);
-                        const like = `%${searchTerm}%`;
-                        rows = stmt.all(agentId, like, like, limit);
-                    }
-                    else {
-                        const stmt = state.db.prepare(`
-              SELECT key, value, updated_at, session_key FROM memories
-              WHERE session_key IN (${readablePlaceholders}) AND (key LIKE ? OR value LIKE ?)
-              ORDER BY CASE WHEN session_key = ? THEN 0 ELSE 1 END, updated_at DESC
-              LIMIT ?
-            `);
-                        const like = `%${searchTerm}%`;
-                        rows = stmt.all(...readableSessionKeys, like, like, sessionKey, limit);
-                    }
-                }
-                // No params — list all for session
-                else {
-                    const stmt = state.db.prepare(`
-            SELECT key, value, updated_at, session_key FROM memories
-            WHERE session_key IN (${readablePlaceholders})
-            ORDER BY CASE WHEN session_key = ? THEN 0 ELSE 1 END, updated_at DESC
-            LIMIT ?
-          `);
-                    rows = stmt.all(...readableSessionKeys, sessionKey, limit);
-                }
+                const rows = store.recall({
+                    key: key || undefined,
+                    query: query || undefined,
+                    crossSession,
+                    limit,
+                });
                 if (rows.length === 0) {
                     return {
                         content: [{ type: "text", text: "No memories found." }],
                         details: { count: 0 },
                     };
                 }
-                const lines = rows.map((r) => `- ${r.key}: ${r.value} (${rowScope(toolCtx, r.session_key)}${crossSession ? `, session: ${r.session_key.slice(0, 20)}…` : ""})`);
+                const lines = rows.map((r) => `- ${r.key}: ${r.value} (${store.scopeOf(r.session_key)}${crossSession ? `, session: ${r.session_key.slice(0, 20)}…` : ""})`);
                 return {
                     content: [{ type: "text", text: lines.join("\n") }],
                     details: { count: rows.length, keys: rows.map((r) => r.key) },
@@ -361,91 +234,9 @@ Parameters:
                 throw new Error("mnemosyne_search requires 'query'");
             const source = (params.source === "messages" || params.source === "memories") ? params.source : "all";
             const limit = clampInt(params.limit, 10, 1, 50);
-            const ftsQuery = toFtsQuery(query);
-            const agentId = resolveAgentId(toolCtx);
-            const ftsEnabled = state.cfg.enableFts !== false;
+            const store = storeFor(state, toolCtx);
             return withRetry(() => {
-                const results = [];
-                if (source === "all" || source === "messages") {
-                    if (ftsEnabled) {
-                        // Join base table so results stay scoped to THIS agent (no cross-agent leakage)
-                        const msgStmt = state.db.prepare(`
-              SELECT m.content AS content, m.session_key AS session_key, messages_fts.rank AS rank
-              FROM messages_fts JOIN messages m ON m.id = messages_fts.rowid
-              WHERE messages_fts MATCH ? AND m.agent_id = ?
-              ORDER BY messages_fts.rank
-              LIMIT ?
-            `);
-                        const msgRows = msgStmt.all(ftsQuery, agentId, limit);
-                        for (const r of msgRows) {
-                            results.push({
-                                source: "message",
-                                text: r.content.length > 200 ? r.content.slice(0, 200) + "…" : r.content,
-                                session: r.session_key.slice(0, 24),
-                                rank: r.rank,
-                            });
-                        }
-                    }
-                    else {
-                        // FTS disabled — LIKE fallback (rank 0; ordered by recency)
-                        const msgStmt = state.db.prepare(`
-              SELECT content, session_key, timestamp FROM messages
-              WHERE agent_id = ? AND content LIKE ?
-              ORDER BY timestamp DESC
-              LIMIT ?
-            `);
-                        const msgRows = msgStmt.all(agentId, `%${query}%`, limit);
-                        for (const r of msgRows) {
-                            results.push({
-                                source: "message",
-                                text: r.content.length > 200 ? r.content.slice(0, 200) + "…" : r.content,
-                                session: r.session_key.slice(0, 24),
-                                rank: 0,
-                            });
-                        }
-                    }
-                }
-                if (source === "all" || source === "memories") {
-                    if (ftsEnabled) {
-                        const memStmt = state.db.prepare(`
-              SELECT m.key AS key, m.value AS value, m.session_key AS session_key, memories_fts.rank AS rank
-              FROM memories_fts JOIN memories m ON m.id = memories_fts.rowid
-              WHERE memories_fts MATCH ? AND m.agent_id = ?
-              ORDER BY memories_fts.rank
-              LIMIT ?
-            `);
-                        const memRows = memStmt.all(ftsQuery, agentId, limit);
-                        for (const r of memRows) {
-                            results.push({
-                                source: "memory",
-                                text: `${r.key}: ${r.value}`,
-                                session: r.session_key.slice(0, 24),
-                                rank: r.rank,
-                            });
-                        }
-                    }
-                    else {
-                        const memStmt = state.db.prepare(`
-              SELECT key, value, session_key, updated_at FROM memories
-              WHERE agent_id = ? AND (key LIKE ? OR value LIKE ?)
-              ORDER BY updated_at DESC
-              LIMIT ?
-            `);
-                        const like = `%${query}%`;
-                        const memRows = memStmt.all(agentId, like, like, limit);
-                        for (const r of memRows) {
-                            results.push({
-                                source: "memory",
-                                text: `${r.key}: ${r.value}`,
-                                session: r.session_key.slice(0, 24),
-                                rank: 0,
-                            });
-                        }
-                    }
-                }
-                // Sort combined results by rank and trim
-                results.sort((a, b) => a.rank - b.rank);
-                const trimmed = results.slice(0, limit);
+                const trimmed = store.search({ query, source, limit });
                 if (trimmed.length === 0) {
                     return {
                         content: [{ type: "text", text: `No results found for "${query}".` }],
@@ -485,21 +276,13 @@ export function registerListTool(state, toolCtx) {
         },
         async execute(_toolCallId, params) {
             const limit = clampInt(params.limit, 20, 1, 100);
-            const sessionKey = resolveSessionKey(toolCtx);
-            const readableSessionKeys = resolveReadableSessionKeys(toolCtx);
-            const readablePlaceholders = readableSessionKeys.map(() => "?").join(",");
+            const store = storeFor(state, toolCtx);
             return withRetry(() => {
-                const stmt = state.db.prepare(`
-          SELECT key, value, updated_at, session_key FROM memories
-          WHERE session_key IN (${readablePlaceholders})
-          ORDER BY CASE WHEN session_key = ? THEN 0 ELSE 1 END, updated_at DESC
-          LIMIT ?
-        `);
-                const rows = stmt.all(...readableSessionKeys, sessionKey, limit);
+                const rows = store.list(limit);
                 if (rows.length === 0) {
                     return { content: [{ type: "text", text: "No memories stored yet." }], details: { count: 0 } };
                 }
-                const lines = rows.map((r) => `- ${r.key}: ${r.value} (${rowScope(toolCtx, r.session_key)})`);
+                const lines = rows.map((r) => `- ${r.key}: ${r.value} (${store.scopeOf(r.session_key)})`);
                 return {
                     content: [{ type: "text", text: lines.join("\n") }],
                     details: { count: rows.length },
@@ -538,21 +321,12 @@ export function registerForgetTool(state, toolCtx) {
             const scope = params.scope === "agent" || params.scope === "all" ? params.scope : "session";
             if (!key)
                 throw new Error("mnemosyne_forget requires 'key'");
-            const sessionKey = resolveSessionKey(toolCtx);
-            const agentId = resolveAgentId(toolCtx);
-            const targetKeys = scope === "all"
-                ? resolveReadableSessionKeys(toolCtx)
-                : [resolveScopedSessionKey(toolCtx, scope)];
-            const placeholders = targetKeys.map(() => "?").join(",");
+            const store = storeFor(state, toolCtx);
             return withRetry(() => {
-                const stmt = state.db.prepare(`DELETE FROM memories WHERE session_key IN (${placeholders}) AND key = ?`);
-                const info = stmt.run(...targetKeys, key);
-                for (const targetKey of targetKeys) {
-                    refreshMemoryCount(state, targetKey, agentId);
-                }
+                const deleted = store.forget(scope, key);
                 return {
-                    content: [{ type: "text", text: `Deleted ${info.changes} memory from ${scope} scope.` }],
-                    details: { key, scope, deleted: info.changes },
+                    content: [{ type: "text", text: `Deleted ${deleted} memory from ${scope} scope.` }],
+                    details: { key, scope, deleted },
                 };
             });
         },
