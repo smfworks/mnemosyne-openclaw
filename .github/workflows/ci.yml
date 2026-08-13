@@ -20,3 +20,81 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run verify
+
+  # Coverage reporting on Linux only (c8 is lightweight, no extra deps needed
+  # beyond node --experimental-test-coverage which is built into Node 22).
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Run tests with coverage
+        run: node --experimental-test-coverage --test tests/*.test.js 2>&1 | tee coverage-output.txt
+      - name: Extract coverage summary
+        run: |
+          echo "## Test Coverage Summary" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          grep -E '(start|end|slowest|tests|suites|pass|fail|cancelled|skipped|todo|duration)' coverage-output.txt >> $GITHUB_STEP_SUMMARY || true
+          echo '```' >> $GITHUB_STEP_SUMMARY
+      - name: Upload coverage output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage-output.txt
+
+  # Security audit — checks for known vulnerabilities in dependencies.
+  # Only the runtime dependency (better-sqlite3) matters; transitive
+  # vulnerabilities in the openclaw peer dependency are out of scope.
+  security-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Run npm audit (production dependencies only)
+        run: |
+          # Audit only the runtime dependency tree (better-sqlite3).
+          # The openclaw peer dependency's transitive vulnerabilities are
+          # managed by the openclaw project, not this plugin.
+          npm audit --omit=dev --audit-level=high || true
+      - name: Verify better-sqlite3 has no vulnerabilities
+        run: |
+          # Extract only better-sqlite3-related vulnerabilities
+          npm audit --json 2>/dev/null | node -e "
+            const data = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
+            const vulns = data.vulnerabilities || {};
+            const bsq = Object.entries(vulns).filter(([k,v]) =>
+              k === 'better-sqlite3' || (v.via || []).some(v =>
+                typeof v === 'object' && v.name === 'better-sqlite3'
+              )
+            );
+            if (bsq.length > 0) {
+              console.error('FAIL: better-sqlite3 has vulnerabilities:', JSON.stringify(bsq, null, 2));
+              process.exit(1);
+            } else {
+              console.log('OK: better-sqlite3 has no known vulnerabilities.');
+            }
+          "
+
+  # Strict TypeScript check — runs separately to ensure type safety
+  # is never broken even if the main job skips it.
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: TypeScript strict mode check
+        run: npm run check
