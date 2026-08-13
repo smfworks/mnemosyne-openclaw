@@ -66,14 +66,15 @@ export class ScopedStore {
       `)
             .run(target, this.agentId, key, value, now, now);
         // Bounded prune — LIMIT -1 OFFSET keeps the N most-recent rows; SQLite rejects
-        // OFFSET without LIMIT, hence the explicit -1 ("no limit").
+        // OFFSET without LIMIT, hence the explicit -1 ("no limit"). The secondary id sort
+        // makes the keep-set deterministic when timestamps collide.
         this.db
             .prepare(`
         DELETE FROM memories
         WHERE id IN (
           SELECT id FROM memories
           WHERE session_key = ?
-          ORDER BY updated_at DESC
+          ORDER BY updated_at DESC, id DESC
           LIMIT -1 OFFSET ?
         )
       `)
