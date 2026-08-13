@@ -57,7 +57,6 @@ export declare class ScopedStore {
     /** Classify a row's session_key as agent-wide or session-local for display. */
     scopeOf(rowSessionKey: string): MemoryScope;
     private scopeKey;
-    private refreshMemoryCount;
     /** Upsert an explicit memory in the given scope, then prune to the configured cap. */
     rememberMemory(scope: MemoryScope, key: string, value: string): {
         scope: MemoryScope;
@@ -84,4 +83,11 @@ export declare function globalCounts(state: PluginState): {
     memories: number;
     sessions: number;
 };
+/**
+ * FTS5 integrity check — verify the FTS index row counts are consistent with
+ * the base tables. Returns a human-readable status string. If the FTS tables
+ * are corrupt or inaccessible, returns a CORRUPT message with the error.
+ * Used by the admin-gated `/mnemosyne health` command.
+ */
+export declare function ftsIntegrityCheck(state: PluginState): string;
 //# sourceMappingURL=dal.d.ts.map

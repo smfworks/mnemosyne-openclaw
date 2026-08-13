@@ -1,10 +1,12 @@
-/** Build a quoted-term FTS5 MATCH expression (terms ANDed; embedded quotes escaped). */
+/** Build a quoted-term FTS5 MATCH expression (terms ANDed; embedded quotes escaped).
+ * Returns null if no valid terms remain after filtering — caller should treat
+ * that as a no-match rather than issuing an empty MATCH that throws. */
 function toFtsQuery(input) {
     const terms = input
         .trim()
         .split(/\s+/)
         .map((term) => term.replace(/"/g, '""'))
-        .filter(Boolean);
+        .filter((term) => term.length > 0);
     return terms.map((term) => `"${term}"`).join(" ");
 }
 /**
@@ -23,6 +25,12 @@ export class ScopedStore {
         this.agentId = agentId;
         this.sessionKey = sessionKey;
         this.agentKey = `agent:${agentId}:global`;
+        // SECURITY: Reject a sessionKey that collides with another agent's global key.
+        // Without this, a caller could pass sessionKey="agent:otherAgent:global" and
+        // the IN(...) filter would return that agent's global memories.
+        if (sessionKey.startsWith("agent:") && sessionKey !== this.agentKey) {
+            throw new Error(`Mnemosyne: session key '${sessionKey}' collides with another agent's global scope. Use a session-specific key.`);
+        }
         this.readableKeys =
             sessionKey === this.agentKey ? [sessionKey] : [sessionKey, this.agentKey];
         this.placeholders = this.readableKeys.map(() => "?").join(",");
@@ -37,39 +45,19 @@ export class ScopedStore {
     scopeKey(scope) {
         return scope === "agent" ? this.agentKey : this.sessionKey;
     }
-    refreshMemoryCount(sessionKey, now = Date.now()) {
-        const row = this.db
-            .prepare(`SELECT COUNT(*) as c FROM memories WHERE session_key = ?`)
-            .get(sessionKey);
-        this.db
-            .prepare(`
-        INSERT INTO sessions (session_key, agent_id, updated_at, memory_count)
-        VALUES (?, ?, ?, ?)
-        ON CONFLICT(session_key) DO UPDATE SET
-          updated_at = excluded.updated_at,
-          memory_count = excluded.memory_count
-      `)
-            .run(sessionKey, this.agentId, now, row.c);
-    }
     // ── Writes ──
     /** Upsert an explicit memory in the given scope, then prune to the configured cap. */
     rememberMemory(scope, key, value) {
         const target = this.scopeKey(scope);
         const now = Date.now();
-        this.db
-            .prepare(`
+        const upsertStmt = this.db.prepare(`
         INSERT INTO memories (session_key, agent_id, key, value, timestamp, updated_at)
         VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT(session_key, key) DO UPDATE SET
           value = excluded.value,
           updated_at = excluded.updated_at
-      `)
-            .run(target, this.agentId, key, value, now, now);
-        // Bounded prune — LIMIT -1 OFFSET keeps the N most-recent rows; SQLite rejects
-        // OFFSET without LIMIT, hence the explicit -1 ("no limit"). The secondary id sort
-        // makes the keep-set deterministic when timestamps collide.
-        this.db
-            .prepare(`
+    `);
+        const pruneStmt = this.db.prepare(`
         DELETE FROM memories
         WHERE id IN (
           SELECT id FROM memories
@@ -77,21 +65,48 @@ export class ScopedStore {
           ORDER BY updated_at DESC, id DESC
           LIMIT -1 OFFSET ?
         )
-      `)
-            .run(target, this.state.cfg.maxMemoriesPerSession);
-        this.refreshMemoryCount(target, now);
+    `);
+        const countStmt = this.db.prepare(`SELECT COUNT(*) as c FROM memories WHERE session_key = ?`);
+        const upsertSessionStmt = this.db.prepare(`
+        INSERT INTO sessions (session_key, agent_id, updated_at, memory_count)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(session_key) DO UPDATE SET
+          updated_at = excluded.updated_at,
+          memory_count = excluded.memory_count
+    `);
+        // Wrap INSERT + PRUNE + COUNT in a single transaction for atomicity.
+        this.db.transaction(() => {
+            upsertStmt.run(target, this.agentId, key, value, now, now);
+            pruneStmt.run(target, this.state.cfg.maxMemoriesPerSession);
+            const row = countStmt.get(target);
+            upsertSessionStmt.run(target, this.agentId, now, row.c);
+        })();
         return { scope };
     }
     /** Delete a memory by exact key from the session, agent, or both scopes. */
     forget(scope, key) {
         const targets = scope === "all" ? this.readableKeys : [this.scopeKey(scope)];
         const placeholders = targets.map(() => "?").join(",");
-        const info = this.db
-            .prepare(`DELETE FROM memories WHERE session_key IN (${placeholders}) AND key = ?`)
-            .run(...targets, key);
-        for (const target of targets)
-            this.refreshMemoryCount(target);
-        return info.changes;
+        const deleteStmt = this.db.prepare(`DELETE FROM memories WHERE session_key IN (${placeholders}) AND key = ?`);
+        const countStmt = this.db.prepare(`SELECT COUNT(*) as c FROM memories WHERE session_key = ?`);
+        const upsertSessionStmt = this.db.prepare(`
+      INSERT INTO sessions (session_key, agent_id, updated_at, memory_count)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(session_key) DO UPDATE SET
+        updated_at = excluded.updated_at,
+        memory_count = excluded.memory_count
+    `);
+        let changes = 0;
+        this.db.transaction(() => {
+            const info = deleteStmt.run(...targets, key);
+            changes = info.changes;
+            const now = Date.now();
+            for (const target of targets) {
+                const row = countStmt.get(target);
+                upsertSessionStmt.run(target, this.agentId, now, row.c);
+            }
+        })();
+        return changes;
     }
     /** Persist captured conversation turns for this session, then prune to the cap. */
     captureMessages(messages) {
@@ -108,18 +123,8 @@ export class ScopedStore {
         updated_at = excluded.updated_at,
         message_count = message_count + excluded.message_count
     `);
-        const now = Date.now();
-        this.db.transaction(() => {
-            for (const m of messages) {
-                insertStmt.run(this.sessionKey, this.agentId, m.role, m.content, m.timestamp);
-            }
-            updateSessionStmt.run(this.sessionKey, this.agentId, now, messages.length);
-        })();
-        // Single bounded DELETE with no per-id bind parameters, so a large session can
-        // never exceed SQLite's host-parameter ceiling. The secondary id sort makes
-        // the keep-set deterministic when timestamps collide.
-        this.db
-            .prepare(`
+        // Prune in the same transaction so the INSERT+PRUNE is atomic.
+        const pruneStmt = this.db.prepare(`
         DELETE FROM messages
         WHERE session_key = ?
           AND id NOT IN (
@@ -128,8 +133,23 @@ export class ScopedStore {
             ORDER BY timestamp DESC, id DESC
             LIMIT ?
           )
-      `)
-            .run(this.sessionKey, this.sessionKey, this.state.cfg.maxMessagesPerSession);
+    `);
+        // Update message_count after prune to reflect the actual retained count.
+        const recountStmt = this.db.prepare(`
+      UPDATE sessions SET message_count = (
+        SELECT COUNT(*) FROM messages WHERE session_key = ?
+      )
+      WHERE session_key = ?
+    `);
+        const now = Date.now();
+        this.db.transaction(() => {
+            for (const m of messages) {
+                insertStmt.run(this.sessionKey, this.agentId, m.role, m.content, m.timestamp);
+            }
+            updateSessionStmt.run(this.sessionKey, this.agentId, now, messages.length);
+            pruneStmt.run(this.sessionKey, this.sessionKey, this.state.cfg.maxMessagesPerSession);
+            recountStmt.run(this.sessionKey, this.sessionKey);
+        })();
     }
     // ── Reads ──
     /** Recall explicit memories by exact key or fuzzy query, scoped to this agent. */
@@ -327,5 +347,23 @@ export function globalCounts(state) {
         memories: one(`SELECT COUNT(*) as c FROM memories`),
         sessions: one(`SELECT COUNT(*) as c FROM sessions`),
     };
+}
+/**
+ * FTS5 integrity check — verify the FTS index row counts are consistent with
+ * the base tables. Returns a human-readable status string. If the FTS tables
+ * are corrupt or inaccessible, returns a CORRUPT message with the error.
+ * Used by the admin-gated `/mnemosyne health` command.
+ */
+export function ftsIntegrityCheck(state) {
+    try {
+        const msgFtsCount = state.db.prepare(`SELECT COUNT(*) as c FROM messages_fts`).get();
+        const memFtsCount = state.db.prepare(`SELECT COUNT(*) as c FROM memories_fts`).get();
+        const msgCount = state.db.prepare(`SELECT COUNT(*) as c FROM messages`).get();
+        const memCount = state.db.prepare(`SELECT COUNT(*) as c FROM memories`).get();
+        return `enabled (messages: ${msgFtsCount.c}/${msgCount.c}, memories: ${memFtsCount.c}/${memCount.c})`;
+    }
+    catch (ftsErr) {
+        return `CORRUPT: ${ftsErr instanceof Error ? ftsErr.message : String(ftsErr)}`;
+    }
 }
 //# sourceMappingURL=dal.js.map

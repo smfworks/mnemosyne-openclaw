@@ -1,5 +1,6 @@
 import { buildSessionKey, extractMessages } from "../helpers.js";
 import { ScopedStore } from "../dal.js";
+import { withRetry } from "../retry.js";
 export function registerCaptureHook(api, state) {
     api.logger.info("[mnemosyne] Capture hook registered");
     // We attach to agent_end via OpenClaw's api.on() in the main plugin register().
@@ -15,6 +16,9 @@ export async function onAgentEnd(event, ctx, state) {
     if (extracted.length === 0)
         return;
     // All persistence + bounded pruning goes through the agent-scoped DAL.
-    new ScopedStore(state, agentId, sessionKey).captureMessages(extracted);
+    // Wrap in withRetry so transient SQLITE_BUSY doesn't silently drop captures.
+    withRetry(() => {
+        new ScopedStore(state, agentId, sessionKey).captureMessages(extracted);
+    });
 }
 //# sourceMappingURL=capture.js.map

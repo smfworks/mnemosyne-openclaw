@@ -7,7 +7,7 @@
 import { createPluginState } from "./state.js";
 import { onAgentEnd } from "./hooks/capture.js";
 import { closeDatabase } from "./database.js";
-import { globalCounts } from "./dal.js";
+import { globalCounts, ftsIntegrityCheck } from "./dal.js";
 import {
   registerRememberTool,
   registerRecallTool,
@@ -35,8 +35,17 @@ interface PluginApi {
 
 let _state: ReturnType<typeof createPluginState> | null = null;
 
+/** Guard against using state after unload — returns the state or throws. */
+function requireState(): ReturnType<typeof createPluginState> {
+  if (!_state) {
+    throw new Error("Mnemosyne: plugin state is not initialized (already unloaded?)");
+  }
+  return _state;
+}
+
 function sqliteQuickCheck(): string {
-  const row = _state!.db.prepare(`PRAGMA quick_check`).get() as Record<string, string> | undefined;
+  const state = requireState();
+  const row = state.db.prepare(`PRAGMA quick_check`).get() as Record<string, string> | undefined;
   return row ? Object.values(row)[0] ?? "unknown" : "unknown";
 }
 
@@ -56,11 +65,16 @@ const pluginEntry = {
 
     // 2. Register agent_end hook — auto-capture every conversation turn
     api.on("agent_end", async (event, ctx) => {
+      // Guard against hooks firing after unload — _state is null after onPluginUnload.
+      if (!_state) {
+        api.logger.warn("[mnemosyne] agent_end received after unload — skipping");
+        return;
+      }
       try {
         await onAgentEnd(
           event as { success: boolean; messages?: unknown[]; durationMs?: number },
           ctx as { sessionKey?: string; agentId?: string; runId?: string },
-          _state!
+          _state
         );
       } catch (err) {
         api.logger.error(`[mnemosyne] agent_end error: ${err}`);
@@ -68,11 +82,11 @@ const pluginEntry = {
     });
 
     // 3. Register explicit memory tools — each factory receives runtime context
-    api.registerTool((toolCtx: ToolRuntimeContext) => registerRememberTool(_state!, toolCtx), { name: "mnemosyne_remember" });
-    api.registerTool((toolCtx: ToolRuntimeContext) => registerRecallTool(_state!, toolCtx),   { name: "mnemosyne_recall" });
-    api.registerTool((toolCtx: ToolRuntimeContext) => registerSearchTool(_state!, toolCtx),   { name: "mnemosyne_search" });
-    api.registerTool((toolCtx: ToolRuntimeContext) => registerListTool(_state!, toolCtx),     { name: "mnemosyne_list" });
-    api.registerTool((toolCtx: ToolRuntimeContext) => registerForgetTool(_state!, toolCtx),   { name: "mnemosyne_forget" });
+    api.registerTool((toolCtx: ToolRuntimeContext) => registerRememberTool(requireState(), toolCtx), { name: "mnemosyne_remember" });
+    api.registerTool((toolCtx: ToolRuntimeContext) => registerRecallTool(requireState(), toolCtx),   { name: "mnemosyne_recall" });
+    api.registerTool((toolCtx: ToolRuntimeContext) => registerSearchTool(requireState(), toolCtx),   { name: "mnemosyne_search" });
+    api.registerTool((toolCtx: ToolRuntimeContext) => registerListTool(requireState(), toolCtx),     { name: "mnemosyne_list" });
+    api.registerTool((toolCtx: ToolRuntimeContext) => registerForgetTool(requireState(), toolCtx),   { name: "mnemosyne_forget" });
 
     // 4. Register /mnemosyne slash command
     api.registerCommand({
@@ -89,29 +103,36 @@ const pluginEntry = {
         // absolute DB path.
         const scopes = ctx.gatewayClientScopes;
         const trusted = !scopes || scopes.some((s) => s === "admin" || s === "owner" || s === "mnemosyne:admin");
-        const dbDisplay = trusted ? _state!.cfg.dbPath : (_state!.cfg.dbPath.split(/[\\/]/).pop() ?? "mnemosyne.db");
+        const state = requireState();
+        const dbDisplay = trusted ? state.cfg.dbPath : (state.cfg.dbPath.split(/[\\/]/).pop() ?? "mnemosyne.db");
 
         if (subcmd === "stats") {
-          const counts = globalCounts(_state!);
+          const counts = globalCounts(state);
           const integrity = sqliteQuickCheck();
           return {
-            text: `Mnemosyne Stats:\n- Messages: ${counts.messages}\n- Memories: ${counts.memories}\n- Sessions: ${counts.sessions}\n- DB: ${dbDisplay}\n- FTS: ${_state!.cfg.enableFts ? "enabled" : "disabled"}\n- SQLite quick_check: ${integrity}`,
+            text: `Mnemosyne Stats:\n- Messages: ${counts.messages}\n- Memories: ${counts.memories}\n- Sessions: ${counts.sessions}\n- DB: ${dbDisplay}\n- FTS: ${state.cfg.enableFts ? "enabled" : "disabled"}\n- SQLite quick_check: ${integrity}`,
           };
         }
 
         if (subcmd === "health") {
           if (!trusted) return { text: "Mnemosyne: 'health' requires an admin/owner scope." };
           const integrity = sqliteQuickCheck();
-          const wal = _state!.db.pragma("wal_checkpoint(PASSIVE)") as unknown;
+          const wal = state.db.pragma("wal_checkpoint(PASSIVE)") as unknown;
+          // FTS5 integrity check delegated to the DAL (the only module allowed to
+          // query the content tables).
+          let ftsStatus = "disabled";
+          if (state.cfg.enableFts) {
+            ftsStatus = ftsIntegrityCheck(state);
+          }
           return {
-            text: `Mnemosyne Health:\n- SQLite quick_check: ${integrity}\n- WAL checkpoint: ${JSON.stringify(wal)}\n- DB: ${dbDisplay}`,
+            text: `Mnemosyne Health:\n- SQLite quick_check: ${integrity}\n- FTS5: ${ftsStatus}\n- WAL checkpoint: ${JSON.stringify(wal)}\n- DB: ${dbDisplay}`,
           };
         }
 
         if (subcmd === "vacuum") {
           if (!trusted) return { text: "Mnemosyne: 'vacuum' requires an admin/owner scope." };
-          _state!.db.pragma("incremental_vacuum");
-          _state!.db.pragma("wal_checkpoint(TRUNCATE)");
+          state.db.pragma("incremental_vacuum");
+          state.db.pragma("wal_checkpoint(TRUNCATE)");
           return {
             text: "Mnemosyne maintenance complete: incremental_vacuum and WAL checkpoint(TRUNCATE) finished.",
           };

@@ -13,6 +13,7 @@
 import { PluginState } from "../state.js";
 import { ToolRuntimeContext } from "../types/runtime.js";
 import { ScopedStore, MemoryScope, ForgetScope } from "../dal.js";
+import { withRetry, sleepSync, isBusyError } from "../retry.js";
 
 // ── Input validation constants ──
 
@@ -26,39 +27,7 @@ const MAX_QUERY_LENGTH = 1024;
 const MAX_ID_LENGTH = 512;
 
 // ── Error guards ──
-
-/** Sleep synchronously without a CPU spin loop, using Atomics.wait on a throwaway buffer. */
-function sleepSync(ms: number): void {
-  if (ms <= 0) return;
-  try {
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-  } catch {
-    // SharedArrayBuffer unavailable (rare hardened runtime) — fall back to a bounded spin.
-    const start = Date.now();
-    while (Date.now() - start < ms) { /* fallback */ }
-  }
-}
-
-/** Check if an error is a transient SQLITE_BUSY (WAL contention) */
-function isBusyError(err: unknown): boolean {
-  if (!(err instanceof Error)) return false;
-  return err.message.includes("SQLITE_BUSY") || (err as unknown as Record<string, unknown>).code === "SQLITE_BUSY";
-}
-
-/** Retry a synchronous operation up to 3 times with exponential backoff for SQLITE_BUSY */
-function withRetry<T>(fn: () => T, maxRetries = 3): T {
-  for (let i = 0; i <= maxRetries; i++) {
-    try {
-      return fn();
-    } catch (err) {
-      if (i === maxRetries || !isBusyError(err)) throw err;
-      // Non-blocking-of-CPU backoff: park the thread without burning a spin loop.
-      const ms = Math.min(100 * Math.pow(2, i), 500);
-      sleepSync(ms);
-    }
-  }
-  throw new Error("unreachable");
-}
+// (sleepSync, isBusyError, withRetry moved to src/retry.ts)
 
 /**
  * Wrap a tool's execute function with structured error handling.
@@ -86,14 +55,29 @@ function withErrorHandling(
 // ── Resolve session key ──
 
 function resolveSessionKey(toolCtx: ToolRuntimeContext): string {
-  if (toolCtx.sessionKey) return toolCtx.sessionKey;
+  if (toolCtx.sessionKey) {
+    const sk = String(toolCtx.sessionKey);
+    if (sk.length > MAX_ID_LENGTH) {
+      throw new Error(`sessionKey exceeds maximum length of ${MAX_ID_LENGTH} characters`);
+    }
+    return sk;
+  }
   const sessionId = typeof toolCtx.sessionId === "string" ? toolCtx.sessionId : undefined;
-  if (sessionId) return sessionId;
+  if (sessionId) {
+    if (sessionId.length > MAX_ID_LENGTH) {
+      throw new Error(`sessionId exceeds maximum length of ${MAX_ID_LENGTH} characters`);
+    }
+    return sessionId;
+  }
   return `agent_${toolCtx.agentId ?? "main"}_default`;
 }
 
 function resolveAgentId(toolCtx: ToolRuntimeContext): string {
-  return toolCtx.agentId ?? "main";
+  const agentId = toolCtx.agentId ?? "main";
+  if (agentId.length > MAX_ID_LENGTH) {
+    throw new Error(`agentId exceeds maximum length of ${MAX_ID_LENGTH} characters`);
+  }
+  return agentId;
 }
 
 function storeFor(state: PluginState, toolCtx: ToolRuntimeContext): ScopedStore {

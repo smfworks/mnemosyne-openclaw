@@ -5,6 +5,7 @@
 import { PluginState } from "../state.js";
 import { buildSessionKey, extractMessages } from "../helpers.js";
 import { ScopedStore } from "../dal.js";
+import { withRetry } from "../retry.js";
 
 export interface CaptureApi {
   logger: {
@@ -39,5 +40,8 @@ export async function onAgentEnd(
   if (extracted.length === 0) return;
 
   // All persistence + bounded pruning goes through the agent-scoped DAL.
-  new ScopedStore(state, agentId, sessionKey).captureMessages(extracted);
+  // Wrap in withRetry so transient SQLITE_BUSY doesn't silently drop captures.
+  withRetry(() => {
+    new ScopedStore(state, agentId, sessionKey).captureMessages(extracted);
+  });
 }
