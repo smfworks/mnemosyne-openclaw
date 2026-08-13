@@ -14,6 +14,17 @@ import { PluginState } from "../state.js";
 import { ToolRuntimeContext } from "../types/runtime.js";
 import { ScopedStore, MemoryScope, ForgetScope } from "../dal.js";
 
+// ── Input validation constants ──
+
+/** Maximum length for a memory key (after normalization). */
+const MAX_KEY_LENGTH = 256;
+/** Maximum length for a memory value. */
+const MAX_VALUE_LENGTH = 16384;
+/** Maximum length for a search query. */
+const MAX_QUERY_LENGTH = 1024;
+/** Maximum length for an agent ID or session key. */
+const MAX_ID_LENGTH = 512;
+
 // ── Error guards ──
 
 /** Sleep synchronously without a CPU spin loop, using Atomics.wait on a throwaway buffer. */
@@ -49,6 +60,29 @@ function withRetry<T>(fn: () => T, maxRetries = 3): T {
   throw new Error("unreachable");
 }
 
+/**
+ * Wrap a tool's execute function with structured error handling.
+ * Translates raw DB errors into user-friendly tool responses instead of
+ * propagating unstructured exceptions to the agent runtime.
+ */
+function withErrorHandling(
+  fn: (toolCallId: string, params: Record<string, unknown>) => Promise<unknown>,
+  toolName: string
+): (toolCallId: string, params: Record<string, unknown>) => Promise<unknown> {
+  return async (toolCallId: string, params: Record<string, unknown>) => {
+    try {
+      return await fn(toolCallId, params);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return {
+        content: [{ type: "text", text: `Error in ${toolName}: ${message}` }],
+        isError: true,
+        details: { error: message },
+      };
+    }
+  };
+}
+
 // ── Resolve session key ──
 
 function resolveSessionKey(toolCtx: ToolRuntimeContext): string {
@@ -74,6 +108,18 @@ function clampInt(input: unknown, fallback: number, min: number, max: number): n
   const n = Number(input);
   if (!Number.isFinite(n)) return fallback;
   return Math.min(Math.max(Math.trunc(n), min), max);
+}
+
+/**
+ * Validate and clamp a string parameter to a maximum length.
+ * Returns the trimmed string or throws if it exceeds the limit.
+ */
+function validateStringParam(value: unknown, name: string, maxLength: number): string {
+  const str = String(value ?? "").trim();
+  if (str.length > maxLength) {
+    throw new Error(`Parameter '${name}' exceeds maximum length of ${maxLength} characters`);
+  }
+  return str;
 }
 
 // ═══════════════════════════════════════════
@@ -115,12 +161,18 @@ Examples:
       },
       required: ["key", "value"],
     },
-    async execute(_toolCallId: string, params: Record<string, unknown>) {
+    execute: withErrorHandling(async (_toolCallId: string, params: Record<string, unknown>) => {
       const key = normalizeKey(params.key);
-      const value = String(params.value ?? "").trim();
+      const value = validateStringParam(params.value, "value", MAX_VALUE_LENGTH);
       const scope: MemoryScope = params.scope === "agent" ? "agent" : "session";
-      if (!key || !value) {
-        throw new Error("mnemosyne_remember requires 'key' and 'value'");
+      if (!key) {
+        throw new Error("mnemosyne_remember requires 'key'");
+      }
+      if (key.length > MAX_KEY_LENGTH) {
+        throw new Error(`mnemosyne_remember: key exceeds maximum length of ${MAX_KEY_LENGTH} characters`);
+      }
+      if (!value) {
+        throw new Error("mnemosyne_remember requires 'value'");
       }
 
       const store = storeFor(state, toolCtx);
@@ -131,7 +183,7 @@ Examples:
           details: { key, value, scope },
         };
       });
-    },
+    }, "mnemosyne_remember"),
   };
 }
 
@@ -180,11 +232,15 @@ Examples:
       },
       required: [],
     },
-    async execute(_toolCallId: string, params: Record<string, unknown>) {
+    execute: withErrorHandling(async (_toolCallId: string, params: Record<string, unknown>) => {
       const key = normalizeKey(params.key);
-      const query = String(params.query ?? "").trim().toLowerCase();
+      const query = validateStringParam(params.query, "query", MAX_QUERY_LENGTH).toLowerCase();
       const crossSession = Boolean(params.cross_session);
       const limit = clampInt(params.limit, 5, 1, 50);
+
+      if (key.length > MAX_KEY_LENGTH) {
+        throw new Error(`mnemosyne_recall: key exceeds maximum length of ${MAX_KEY_LENGTH} characters`);
+      }
 
       const store = storeFor(state, toolCtx);
       return withRetry(() => {
@@ -211,7 +267,7 @@ Examples:
           details: { count: rows.length, keys: rows.map((r) => r.key) },
         };
       });
-    },
+    }, "mnemosyne_recall"),
   };
 }
 
@@ -257,9 +313,11 @@ Parameters:
       },
       required: ["query"],
     },
-    async execute(_toolCallId: string, params: Record<string, unknown>) {
-      const query = String(params.query ?? "").trim();
-      if (!query) throw new Error("mnemosyne_search requires 'query'");
+    execute: withErrorHandling(async (_toolCallId: string, params: Record<string, unknown>) => {
+      const query = validateStringParam(params.query, "query", MAX_QUERY_LENGTH);
+      if (!query) {
+        throw new Error("mnemosyne_search requires 'query'");
+      }
       const source = (params.source === "messages" || params.source === "memories") ? params.source : "all";
       const limit = clampInt(params.limit, 10, 1, 50);
 
@@ -280,7 +338,7 @@ Parameters:
           details: { count: trimmed.length, query },
         };
       });
-    },
+    }, "mnemosyne_search"),
   };
 }
 
@@ -307,7 +365,7 @@ export function registerListTool(state: PluginState, toolCtx: ToolRuntimeContext
       },
       required: [],
     },
-    async execute(_toolCallId: string, params: Record<string, unknown>) {
+    execute: withErrorHandling(async (_toolCallId: string, params: Record<string, unknown>) => {
       const limit = clampInt(params.limit, 20, 1, 100);
       const store = storeFor(state, toolCtx);
 
@@ -324,7 +382,7 @@ export function registerListTool(state: PluginState, toolCtx: ToolRuntimeContext
           details: { count: rows.length },
         };
       });
-    },
+    }, "mnemosyne_list"),
   };
 }
 
@@ -354,10 +412,15 @@ export function registerForgetTool(state: PluginState, toolCtx: ToolRuntimeConte
       },
       required: ["key"],
     },
-    async execute(_toolCallId: string, params: Record<string, unknown>) {
+    execute: withErrorHandling(async (_toolCallId: string, params: Record<string, unknown>) => {
       const key = normalizeKey(params.key);
       const scope: ForgetScope = params.scope === "agent" || params.scope === "all" ? params.scope : "session";
-      if (!key) throw new Error("mnemosyne_forget requires 'key'");
+      if (!key) {
+        throw new Error("mnemosyne_forget requires 'key'");
+      }
+      if (key.length > MAX_KEY_LENGTH) {
+        throw new Error(`mnemosyne_forget: key exceeds maximum length of ${MAX_KEY_LENGTH} characters`);
+      }
 
       const store = storeFor(state, toolCtx);
       return withRetry(() => {
@@ -367,6 +430,6 @@ export function registerForgetTool(state: PluginState, toolCtx: ToolRuntimeConte
           details: { key, scope, deleted },
         };
       });
-    },
+    }, "mnemosyne_forget"),
   };
 }

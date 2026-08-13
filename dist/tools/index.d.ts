@@ -12,7 +12,6 @@
  */
 import { PluginState } from "../state.js";
 import { ToolRuntimeContext } from "../types/runtime.js";
-import { MemoryScope, ForgetScope } from "../dal.js";
 export declare function registerRememberTool(state: PluginState, toolCtx: ToolRuntimeContext): {
     name: string;
     label: string;
@@ -38,17 +37,7 @@ export declare function registerRememberTool(state: PluginState, toolCtx: ToolRu
         };
         required: string[];
     };
-    execute(_toolCallId: string, params: Record<string, unknown>): Promise<{
-        content: {
-            type: string;
-            text: string;
-        }[];
-        details: {
-            key: string;
-            value: string;
-            scope: MemoryScope;
-        };
-    }>;
+    execute: (toolCallId: string, params: Record<string, unknown>) => Promise<unknown>;
 };
 export declare function registerRecallTool(state: PluginState, toolCtx: ToolRuntimeContext): {
     name: string;
@@ -81,25 +70,7 @@ export declare function registerRecallTool(state: PluginState, toolCtx: ToolRunt
         };
         required: never[];
     };
-    execute(_toolCallId: string, params: Record<string, unknown>): Promise<{
-        content: {
-            type: string;
-            text: string;
-        }[];
-        details: {
-            count: number;
-            keys?: undefined;
-        };
-    } | {
-        content: {
-            type: string;
-            text: string;
-        }[];
-        details: {
-            count: number;
-            keys: string[];
-        };
-    }>;
+    execute: (toolCallId: string, params: Record<string, unknown>) => Promise<unknown>;
 };
 export declare function registerSearchTool(state: PluginState, toolCtx: ToolRuntimeContext): {
     name: string;
@@ -129,16 +100,7 @@ export declare function registerSearchTool(state: PluginState, toolCtx: ToolRunt
         };
         required: string[];
     };
-    execute(_toolCallId: string, params: Record<string, unknown>): Promise<{
-        content: {
-            type: string;
-            text: string;
-        }[];
-        details: {
-            count: number;
-            query: string;
-        };
-    }>;
+    execute: (toolCallId: string, params: Record<string, unknown>) => Promise<unknown>;
 };
 export declare function registerListTool(state: PluginState, toolCtx: ToolRuntimeContext): {
     name: string;
@@ -158,15 +120,7 @@ export declare function registerListTool(state: PluginState, toolCtx: ToolRuntim
         };
         required: never[];
     };
-    execute(_toolCallId: string, params: Record<string, unknown>): Promise<{
-        content: {
-            type: string;
-            text: string;
-        }[];
-        details: {
-            count: number;
-        };
-    }>;
+    execute: (toolCallId: string, params: Record<string, unknown>) => Promise<unknown>;
 };
 export declare function registerForgetTool(state: PluginState, toolCtx: ToolRuntimeContext): {
     name: string;
@@ -189,16 +143,6 @@ export declare function registerForgetTool(state: PluginState, toolCtx: ToolRunt
         };
         required: string[];
     };
-    execute(_toolCallId: string, params: Record<string, unknown>): Promise<{
-        content: {
-            type: string;
-            text: string;
-        }[];
-        details: {
-            key: string;
-            scope: ForgetScope;
-            deleted: number;
-        };
-    }>;
+    execute: (toolCallId: string, params: Record<string, unknown>) => Promise<unknown>;
 };
 //# sourceMappingURL=index.d.ts.map

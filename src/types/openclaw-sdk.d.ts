@@ -72,6 +72,7 @@ declare module "openclaw/plugin-sdk" {
   export interface PluginToolContext {
     agentId?: string;
     sessionKey?: string;
+    sessionId?: string;
     sandboxed?: boolean;
     config?: Record<string, unknown>;
   }
