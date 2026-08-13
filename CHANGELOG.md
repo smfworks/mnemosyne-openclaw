@@ -2,6 +2,36 @@
 
 All notable changes to the Mnemosyne OpenClaw plugin.
 
+## [1.3.0] - 2026-08-13
+
+### Added
+- **Comprehensive input validation** — all tool parameters are now length-bounded: keys (256 chars), values (16,384 chars), queries (1,024 chars). Prevents abuse and accidental memory bloat.
+- **Structured error handling** — all tool `execute` functions wrapped with `withErrorHandling()`. Errors now return `{ isError: true, content, details: { error } }` instead of throwing raw exceptions to the agent runtime.
+- **44 new tests** — expanded from 17 to 61 tests across 7 test files:
+  - `tests/edge-cases.test.js` (24 tests): invalid inputs, empty queries, parameter validation, error response structure, limit clamping
+  - `tests/integration.test.js` (14 tests): full lifecycle, cross-session agent memory, agent isolation, FTS-disabled mode, session key fallback, pruning
+  - `tests/concurrent.test.js` (6 tests): concurrent remember/recall/search, cross-session isolation under concurrency, upsert deduplication
+- **Dockerfile** — multi-stage build (builder + runtime), health check, non-root user, `MNEMOSYNE_DB_PATH` environment variable
+- **CONTRIBUTING.md** — development setup, architecture overview, code style guidelines, testing instructions, PR process, backward compatibility policy, dependency policy
+- **LICENSE** — MIT license file (SMF Works)
+- **`.dockerignore`** — excludes node_modules, .git, and build artifacts from Docker context
+- **CI coverage job** — uses Node 22 built-in `--experimental-test-coverage` with GitHub Steps Summary output
+- **CI security audit job** — verifies `better-sqlite3` has no known vulnerabilities (transitive vulns in the openclaw peer dep are out of scope)
+- **CI typecheck job** — isolated TypeScript strict mode verification
+- **`sessionId` field** — added to `ToolRuntimeContext` and `PluginToolContext` for fallback session resolution
+
+### Fixed
+- **Memory prune determinism** — added `id DESC` tiebreaker to the memories prune query (`ORDER BY updated_at DESC, id DESC`), matching the messages prune pattern. Without this, rapid writes with identical timestamps could produce non-deterministic pruning behavior.
+
+### Changed
+- **Version bumped to 1.3.0**.
+- **README** — comprehensive rewrite with deployment guide (Docker + bare metal), full API reference for all 5 tools, configuration reference table, architecture deep-dive (DAL pattern, SQLite pragmas, FTS5, auto-pruning), test coverage table, and expanded troubleshooting.
+- **CI workflow** — enhanced from single build-test job to 4 jobs: build-test (cross-platform matrix), coverage, security-audit, typecheck.
+
+### Test Coverage
+- 61 tests, all passing (up from 17)
+- 92% line coverage, 82% branch coverage, 90% function coverage
+
 ## [1.2.0] - 2026-05-28
 
 ### Added

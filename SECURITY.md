@@ -79,6 +79,8 @@ Do NOT report security issues in public Discord channels or forums before they a
 
 | Version | Supported |
 |---------|-----------|
-| 1.1.x   | ✅ Active |
-| 1.0.x   | ❌ Has known `default_session` bug — upgrade to 1.1.x |
+| 1.3.x   | ✅ Active |
+| 1.2.x   | ✅ Active |
+| 1.1.x   | ⚠️ Maintained (upgrade recommended) |
+| 1.0.x   | ❌ Has known `default_session` bug — upgrade to 1.1.x+ |
 | < 1.0   | ❌ Pre-release |
