@@ -8,6 +8,26 @@
 
 **Zero network. Zero API keys. Zero cloud. Native to OpenClaw.**
 
+## OpenClaw companion
+
+Mnemosyne is an SMF Works memory plugin for OpenClaw. **OpenClaw itself is not an SMF Works product.** A working gateway from upstream is required before this plugin can load.
+
+- Canonical install: [github.com/openclaw/openclaw](https://github.com/openclaw/openclaw) and [openclaw.ai](https://openclaw.ai). Docs: [docs.openclaw.ai](https://docs.openclaw.ai).
+- [github.com/smfworks/openclaw](https://github.com/smfworks/openclaw) is an SMF fork/mirror of that upstream repo. It is not the canonical source.
+- Companion map: [smf-openclaw-vision `docs/companion-bundle.md`](https://github.com/smfworks/smf-openclaw-vision/blob/main/docs/companion-bundle.md). This repo keeps a short pointer at [docs/companion-bundle.md](docs/companion-bundle.md) and does not copy the map.
+
+SMF authors three companions only:
+
+| Piece | Repository | Purpose |
+|-------|------------|---------|
+| Skills | [smfworks/smfworks-skills](https://github.com/smfworks/smfworks-skills) | Free OpenClaw skills pack for everyday file, document, and system tasks. |
+| Memory | this repo | Offline SQLite memory plugin that runs inside the OpenClaw gateway. |
+| Vision | [smfworks/smf-openclaw-vision](https://github.com/smfworks/smf-openclaw-vision) | Community guide for iPhone vision over Tailscale. |
+
+**Suggested order:** upstream OpenClaw → optional skills → memory (this repo) → optional vision.
+
+The skills pack and the vision guide are optional. Mnemosyne still needs a working OpenClaw gateway from upstream.
+
 ## What's New in v1.3.0
 
 | Change | Before | After |
@@ -121,7 +141,7 @@ Mnemosyne enforces agent/session isolation through a **ScopedStore** pattern:
 
 ### Prerequisites
 - Node.js 22 LTS. `package.json` declares `>=22 <24` because Node 24 may require local `better-sqlite3` compilation until matching prebuilt binaries are available.
-- OpenClaw >= 2026.4.27
+- OpenClaw >= 2026.4.27, installed from upstream: [openclaw/openclaw](https://github.com/openclaw/openclaw) ([openclaw.ai](https://openclaw.ai)). [smfworks/openclaw](https://github.com/smfworks/openclaw) is a fork/mirror only.
 - `python3` and `make` (for better-sqlite3 native compilation)
 
 ### Bare Metal Installation
@@ -471,6 +491,8 @@ mnemosyne-openclaw/
 │   ├── SOUL.md                ← Plugin philosophy
 │   ├── AGENTS.md              ← Agent contract
 │   └── BOOTSTRAP.md           ← Quick start
+├── docs/
+│   └── companion-bundle.md    ← Pointer to the canonical companion map
 ├── Dockerfile                 ← Multi-stage container build
 ├── CONTRIBUTING.md            ← Development guide
 ├── LICENSE                    ← MIT license
